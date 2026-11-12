@@ -33,7 +33,11 @@ class FirebaseService {
       await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
     }
     _auth ??= FirebaseAuth.instance;
-    _database ??= FirebaseDatabase.instance;
+    // Explicit RTDB URL — required for non-default / regional databases.
+    _database ??= FirebaseDatabase.instanceFor(
+      app: Firebase.app(),
+      databaseURL: DefaultFirebaseOptions.currentPlatform.databaseURL,
+    );
     _initialized = true;
     return true;
   }
@@ -43,7 +47,14 @@ class FirebaseService {
       throw SyncException('Firebase is not configured on this device.');
     }
     if (_auth!.currentUser == null) {
-      await _auth!.signInAnonymously();
+      try {
+        await _auth!.signInAnonymously();
+      } catch (e) {
+        throw SyncException(
+          'Firebase Anonymous Auth failed. Enable Anonymous sign-in '
+          'in Firebase Console → Authentication. ($e)',
+        );
+      }
     }
   }
 
@@ -120,7 +131,14 @@ class FirebaseService {
       };
     }
 
-    updates['water/stations/${station.id}/last_updated'] = uploadedAt;
+    // Full station node required: rules validate `name` on every write.
+    // Writing only `last_updated` fails when the station does not exist yet,
+    // and that aborts the entire multi-path update (readings never land).
+    updates['water/stations/${station.id}'] = {
+      'name': station.name,
+      if (station.mountHeightMm != null) 'mount_height_mm': station.mountHeightMm,
+      'last_updated': uploadedAt,
+    };
     await _database!.ref().update(updates);
   }
 }

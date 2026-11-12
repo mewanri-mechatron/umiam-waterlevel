@@ -1,120 +1,100 @@
 # ESP8266 Gateway API Contract (Node B)
 
-Base URL: `http://192.168.4.1`
+Base URL: `http://192.168.4.1` (plain HTTP, all GET, JSON, CORS allowed)
 
-WiFi AP: SSID `WaterLevel`, IP `192.168.4.1`
+WiFi AP: SSID `WaterLevel`, password `12345678`, IP `192.168.4.1`
 
-Node B firmware is developed separately. The mobile app uses a **gateway adapter**
-so endpoints/JSON can change without rewriting repositories or UI.
+Android: allow cleartext HTTP to `192.168.4.1` and bind requests to the SoftAP network.
 
-## Assumptions (MVP)
+## Units
 
-1. Gateway exposes HTTP over its SoftAP.
-2. Phone may have **no internet** while connected to the AP.
-3. Sequence numbers are **not** globally unique across reboots — identity is `boot_id + seq` (plus `station_id` on the phone).
-4. ACK must name the exact records stored; never ACK before SQLite commit.
-5. A future cursor-based incremental API may replace or extend `since=<seq>`.
+Node B sends `dist` and `level` in **millimetres**.  
+UI + Firebase display/upload them in **metres** (`mm / 1000`, 2 decimals).  
+`null` stays null (show `—`).
+
+## Unique key
+
+`boot_seq` (e.g. `74_31722`) — avoid duplicates across reboots.
+
+## Status codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | OK |
+| 1 | Too close (&lt;0.28 m) |
+| 2 | No echo |
+| 3 | Sensor not responding |
 
 ## Endpoints
+
+### GET /time?epoch=&lt;unix seconds&gt;
+
+Call first on every connect (sets Node B clock).
 
 ### GET /status
 
 ```json
 {
-  "device": "WaterLevel",
-  "status": "online",
-  "queue_count": 12,
-  "last_sequence": 456,
-  "last_boot_id": 123
+  "records": 12,
+  "packets": 40,
+  "time_set": true,
+  "pending_interval": 0,
+  "latest": {
+    "id": 100,
+    "seq": 456,
+    "ts": 1790000030,
+    "dist": 1250,
+    "level": 3750,
+    "status": 0,
+    "interval": 30
+  }
 }
 ```
 
-### GET /data?since=&lt;sequence&gt;
-
-MVP query uses sequence for convenience. Clients **must** dedupe by `boot_id + seq`.
-
-When the transmitter restarts, `boot_id` changes and sequences may restart.
-Preferred future form:
-
-```
-GET /data?cursor=<boot_id>_<seq>
-```
-
-Response:
+### GET /data?since=&lt;id&gt;&limit=200
 
 ```json
 {
-  "readings": [
-    {
-      "version": 180,
-      "boot_id": 123,
-      "seq": 456,
-      "age_seconds": 30,
-      "distance_mm": 1250,
-      "water_level_mm": 3750,
-      "status": 0,
-      "valid_samples": 3,
-      "send_interval_seconds": 30
-    }
-  ]
-}
-```
-
-### POST /ack
-
-Confirms the phone has committed records to SQLite.
-
-```json
-{
-  "station_id": "station_001",
   "records": [
-    { "boot_id": 123, "seq": 456 },
-    { "boot_id": 123, "seq": 457 }
-  ]
+    {
+      "id": 101,
+      "boot": 123,
+      "seq": 456,
+      "ts": 1790000030,
+      "dist": 1250,
+      "level": 3750,
+      "status": 0,
+      "samples": 3,
+      "interval": 30
+    }
+  ],
+  "last_id": 101,
+  "more": false
 }
 ```
 
-Response:
+Repeat with `since=last_id` while `more=true`.
 
-```json
-{ "acked": 2, "status": "ok" }
-```
+### GET /ack?upto=&lt;id&gt;
 
-If a reading already exists locally, it is safe to ACK again.
+Call **only** after records are saved locally. Node B then deletes them.
 
-### POST /time
+### GET /config?interval=&lt;10..3600&gt;
 
-Body:
+Sets Node A send interval; applied after Node A’s next send. While waiting, `/status` may show `pending_interval > 0`.
 
-```json
-{ "unix_timestamp": 1790000030 }
-```
+## Sync flow (phone)
 
-Response:
+1. Join `WaterLevel` WiFi  
+2. `GET /time?epoch=…`  
+3. `GET /data` loop (`since` / `last_id` / `more`)  
+4. Save locally (dedupe `boot`+`seq`)  
+5. `GET /ack?upto=last_id`  
+6. When internet is available, upload to Firebase and mark uploaded
 
-```json
-{ "status": "ok", "applied": true }
-```
+## Firebase
 
-## Download workflow (phone)
+Path used by this app: `/water/readings/<station_id>/<boot>_<seq>`  
+Also updates `/water/latest/<station_id>` and `/water/stations/<station_id>`.
 
-1. Connect to WaterLevel WiFi
-2. `GET /status`
-3. `POST /time`
-4. `GET /data?...`
-5. Validate each reading
-6. Insert in a SQLite transaction (ignore duplicates)
-7. Commit
-8. `POST /ack` for successfully stored records
-9. Update UI / sync_state
-
-Crash before ACK → re-download is safe (unique constraint prevents duplicates).
-
-## Adapter note
-
-Implement `GatewayClient` with:
-
-- `HttpGatewayService` — real hardware
-- `MockGatewayService` — development without Node B
-
-Keep mock records clearly labeled and separate from field data.
+Fields include mm and metres (`distance_m`, `water_level_m`).

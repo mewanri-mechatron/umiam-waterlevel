@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Umiam Dam · WaterLevel</title>
-  <link rel="stylesheet" href="css/styles.css?v=41" />
+  <link rel="stylesheet" href="css/styles.css?v=45" />
   <script src="https://cdn.jsdelivr.net/npm/apexcharts@4.5.0/dist/apexcharts.min.js"></script>
 </head>
 <body>
@@ -18,6 +18,7 @@
           <p id="cardLevel" class="level">—</p>
           <span class="unit">m</span>
         </div>
+        <p id="cardLevelRaw" class="raw-line">Raw level —</p>
         <p id="cardMeasured" class="when">—</p>
       </section>
 
@@ -29,11 +30,12 @@
         </div>
         <div class="hero-stats">
           <div><span>Distance</span><strong id="cardDistance">—</strong></div>
+          <div><span>Raw dist</span><strong id="cardDistanceRaw">—</strong></div>
+          <div><span>Raw level</span><strong id="cardLevelRawStat">—</strong></div>
           <div><span>Sensor</span><strong id="cardSensor">—</strong></div>
           <div><span>Condition</span><strong id="dataStatusShort">—</strong></div>
-          <div><span>Cloud</span><strong id="cardUpload">—</strong></div>
-          <div><span>Freshness</span><strong id="cardFreshness">—</strong></div>
-          <div><span>Link</span><strong id="firebaseStatus">…</strong></div>
+          <div><span>Last updated</span><strong id="cardFreshness">—</strong></div>
+          <div><span>Status</span><strong id="firebaseStatus">…</strong></div>
         </div>
       </section>
     </header>
@@ -65,6 +67,8 @@
               <tr>
                 <th data-sort="measurement_time">Time</th>
                 <th data-sort="water_level_mm">Level</th>
+                <th data-sort="distance_mm">Raw dist</th>
+                <th data-sort="water_level_mm">Raw level</th>
                 <th data-sort="status">Status</th>
               </tr>
             </thead>
@@ -79,9 +83,9 @@
     </section>
   </div>
 
-  <script src="js/firebase-config.js?v=41"></script>
-  <script src="js/demo-data.js?v=41"></script>
-  <script type="module" src="js/firebase.js?v=41"></script>
-  <script type="module" src="js/app.js?v=41"></script>
+  <script src="js/firebase-config.js?v=45"></script>
+  <script src="js/demo-data.js?v=45"></script>
+  <script type="module" src="js/firebase.js?v=45"></script>
+  <script type="module" src="js/app.js?v=45"></script>
 </body>
 </html>

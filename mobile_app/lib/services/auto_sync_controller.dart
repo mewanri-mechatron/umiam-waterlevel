@@ -58,8 +58,9 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     if (_started) return;
     _started = true;
     WidgetsBinding.instance.addObserver(this);
+    await _network.requestWifiPermissions();
     _sub = _network.onConnectivityChanged.listen((_) => unawaited(runCycle()));
-    await runCycle();
+    await runCycle(force: true);
   }
 
   @override
@@ -70,15 +71,30 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> runCycle({bool force = false}) async {
-    if (_running) return;
+    // Force (Sync now) waits briefly for an in-flight cycle instead of no-op.
+    if (_running) {
+      if (!force) return;
+      for (var i = 0; i < 40 && _running; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      if (_running) return;
+    }
     _running = true;
     try {
       final onGateway = await _network.isConnectedToGatewayWifi();
       final demo = _isDemoMode();
       final online = await _network.hasInternet();
       final now = DateTime.now();
+      final diag = await _network.wifiDiagnostics();
+      // ignore: avoid_print
+      print(
+        'WaterLevel sync: onGateway=$onGateway demo=$demo online=$online '
+        'ssid=${diag['ssid']} ipv4=${diag['ipv4']} subnet=${diag['onGatewaySubnet']}',
+      );
 
-      if (onGateway || demo || force) {
+      // Only hit the ESP when actually on SoftAP (or demo). Don't force
+      // gateway download while on normal internet — that races the upload.
+      if (onGateway || demo) {
         final canTryGateway = force ||
             _lastGatewayAttempt == null ||
             now.difference(_lastGatewayAttempt!) > const Duration(seconds: 20);
@@ -91,12 +107,26 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
           );
           try {
             final result = await _sync.downloadFromGateway();
-            _set(
-              AutoSyncPhase.idle,
-              result.inserted > 0
-                  ? 'Saved ${result.inserted} new readings on this phone'
-                  : 'Sensor checked · no new readings',
-            );
+            if (result.inserted > 0) {
+              _set(
+                AutoSyncPhase.idle,
+                'Saved ${result.inserted} new readings on this phone',
+              );
+            } else if (result.downloaded == 0) {
+              final note = result.message == null || result.message!.isEmpty
+                  ? ''
+                  : ' · ${result.message}';
+              _set(
+                AutoSyncPhase.idle,
+                'ESP reachable, 0 readings in queue$note. '
+                'Check Node A→LoRa→Node B, or open http://192.168.4.1/data?since=0 on the phone',
+              );
+            } else {
+              _set(
+                AutoSyncPhase.idle,
+                'Sensor checked · ${result.duplicates} already saved, no new rows',
+              );
+            }
           } catch (e) {
             _set(
               AutoSyncPhase.error,
@@ -107,6 +137,9 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
         }
       }
 
+      // SoftAP has no internet — bind LTE/validated data before Firebase.
+      await _network.clearNetworkBinding();
+      await _network.bindToInternetNetwork();
       final onlineNow = await _network.hasInternet();
       if (onlineNow || (force && online)) {
         final canTryUpload = force ||
@@ -120,25 +153,59 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
             busy: true,
           );
           try {
-            final result = await _sync.uploadPendingToFirebase();
+            await _network.bindToInternetNetwork();
+            var result = await _sync.uploadPendingToFirebase();
+            // Another uploader (startup / WorkManager overlap) — wait and retry once.
+            if (result.message == 'Upload already in progress.') {
+              _set(
+                AutoSyncPhase.uploading,
+                'Cloud upload already running…',
+                busy: true,
+              );
+              await Future<void>.delayed(const Duration(seconds: 2));
+              result = await _sync.uploadPendingToFirebase();
+            }
+            final detail = result.message ?? '';
+            final busyMsg = detail == 'Upload already in progress.';
+            final noopMsg = detail == 'Nothing pending for upload.' ||
+                detail.startsWith('No internet');
             if (result.uploaded > 0) {
               _set(
                 AutoSyncPhase.idle,
-                'Sent ${result.uploaded} readings to cloud',
+                'Sent ${result.uploaded} readings to cloud'
+                '${result.pendingRemaining > 0 ? ' · ${result.pendingRemaining} still pending' : ''}',
               );
-            } else if (result.message != null &&
-                result.message!.contains('Firebase')) {
+            } else if (result.pendingRemaining < 0 ||
+                detail.startsWith('No internet')) {
               _set(
                 AutoSyncPhase.idle,
-                'Readings are saved on this phone · cloud not configured yet',
+                'No internet for cloud upload · ${await _network.wifiDiagnostics().then((d) => d['ssid']) ?? 'WiFi'}',
               );
-            } else if ((result.pendingRemaining) > 0) {
+            } else if (busyMsg) {
               _set(
                 AutoSyncPhase.idle,
-                '${result.pendingRemaining} readings waiting for internet',
+                'Cloud upload in progress · ${result.pendingRemaining} still on phone',
               );
-            } else {
+            } else if (result.failed > 0) {
+              final short = detail.contains('permission-denied')
+                  ? 'Cloud permission denied · ${result.pendingRemaining} still on phone'
+                  : detail.toLowerCase().contains('anonymous')
+                      ? 'Cloud auth failed · enable Anonymous Auth in Firebase'
+                      : 'Cloud upload failed · ${result.pendingRemaining} still on phone';
+              _set(
+                AutoSyncPhase.error,
+                short,
+                error: detail,
+              );
+            } else if (result.pendingRemaining > 0) {
+              _set(
+                AutoSyncPhase.idle,
+                '${result.pendingRemaining} readings still pending upload',
+              );
+            } else if (noopMsg || detail.isEmpty) {
               _set(AutoSyncPhase.idle, 'Everything is up to date');
+            } else {
+              _set(AutoSyncPhase.idle, detail);
             }
           } catch (e) {
             _set(

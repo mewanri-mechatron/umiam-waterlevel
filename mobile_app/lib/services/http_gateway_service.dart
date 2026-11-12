@@ -19,6 +19,7 @@ class HttpGatewayService implements GatewayClient {
                 receiveTimeout: const Duration(seconds: 12),
                 sendTimeout: const Duration(seconds: 8),
                 headers: {'Accept': 'application/json'},
+                validateStatus: (code) => code != null && code < 500,
               ),
             ),
         _network = networkService ?? NetworkService();
@@ -32,84 +33,215 @@ class HttpGatewayService implements GatewayClient {
 
   Future<T> _withGatewayNetwork<T>(Future<T> Function() action) async {
     final onAp = await _network.isConnectedToGatewayWifi();
-    if (!onAp) {
+    final bound = await _network.bindToGatewayNetwork();
+    if (!onAp && !bound) {
       throw GatewayException(
         'Not connected to ${AppConstants.gatewaySsid} WiFi. '
-        'Connect to the ESP8266 access point first. '
-        'Android may require you to confirm joining a network without internet.',
+        'Connect to the ESP8266 access point first.',
       );
     }
-    await _network.bindToGatewayNetwork();
     try {
       return await action();
     } on DioException catch (e) {
       throw GatewayException(_friendlyDio(e), cause: e);
-    } finally {
-      // Keep binding while field staff may continue downloads in-session.
     }
   }
 
   String _friendlyDio(DioException e) {
+    final code = e.response?.statusCode;
+    final body = e.response?.data;
+    final bodyHint = body == null ? '' : ' Body: $body';
     switch (e.type) {
       case DioExceptionType.connectionTimeout:
       case DioExceptionType.sendTimeout:
       case DioExceptionType.receiveTimeout:
         return 'Gateway timed out at $baseUrl. Stay on ${AppConstants.gatewaySsid} WiFi.';
       case DioExceptionType.connectionError:
-        return 'Cannot reach gateway $baseUrl. Confirm WiFi is ${AppConstants.gatewaySsid} and IP ${AppConstants.gatewayIp}.';
+        return 'Cannot reach gateway $baseUrl.';
+      case DioExceptionType.badResponse:
+        return 'Gateway HTTP $code.$bodyHint';
       default:
+        if (code != null) return 'Gateway HTTP $code.$bodyHint';
         return 'Gateway request failed: ${e.message ?? e.type.name}';
     }
+  }
+
+  void _ensureOk(Response<dynamic> res, String path) {
+    final code = res.statusCode ?? 0;
+    if (code >= 200 && code < 300) return;
+    throw GatewayException(
+      'Gateway $path returned HTTP $code. Body: ${res.data}',
+    );
+  }
+
+  List<GatewayReadingDto> _parseReadings(dynamic data) {
+    final maps = extractReadingMaps(data);
+    final out = <GatewayReadingDto>[];
+    for (final m in maps) {
+      try {
+        out.add(GatewayReadingDto.fromJson(m));
+      } catch (_) {}
+    }
+    return out;
   }
 
   @override
   Future<GatewayStatus> getStatus() {
     return _withGatewayNetwork(() async {
-      final res = await _dio.get<Map<String, dynamic>>('/status');
-      return GatewayStatus.fromJson(res.data ?? {});
+      final res = await _dio.get<dynamic>('/status');
+      _ensureOk(res, '/status');
+      final data = res.data;
+      if (data is Map) {
+        return GatewayStatus.fromJson(Map<String, dynamic>.from(data));
+      }
+      return const GatewayStatus(
+        device: 'WaterLevel',
+        status: 'unknown',
+        queueCount: 0,
+        lastSequence: 0,
+      );
     });
   }
 
   @override
-  Future<List<GatewayReadingDto>> getData({int? sinceSeq, String? cursor}) {
+  Future<List<GatewayReadingDto>> getData({int sinceId = 0, int limit = 200}) {
     return _withGatewayNetwork(() async {
-      final query = <String, dynamic>{};
-      if (cursor != null) {
-        query['cursor'] = cursor;
-      } else if (sinceSeq != null) {
-        query['since'] = sinceSeq;
-      } else {
-        query['since'] = 0;
+      final all = <GatewayReadingDto>[];
+      var since = sinceId;
+      // Cap pages so a runaway `more=true` cannot loop forever.
+      for (var page = 0; page < 50; page++) {
+        final res = await _dio.get<dynamic>(
+          '/data',
+          queryParameters: {'since': since, 'limit': limit},
+        );
+        _ensureOk(res, '/data');
+        final body = res.data;
+        final records = _parseReadings(body);
+        all.addAll(records);
+
+        var lastId = since;
+        var more = false;
+        if (body is Map) {
+          final map = Map<String, dynamic>.from(body);
+          lastId = _asInt(map['last_id'] ?? map['lastId']) ??
+              records
+                  .map((r) => r.recordId ?? 0)
+                  .fold<int>(since, (a, b) => a > b ? a : b);
+          more = map['more'] == true || map['more'] == 1 || map['more'] == 'true';
+        } else if (records.isNotEmpty) {
+          lastId = records
+              .map((r) => r.recordId ?? 0)
+              .fold<int>(since, (a, b) => a > b ? a : b);
+          more = records.length >= limit;
+        }
+
+        if (!more || records.isEmpty || lastId <= since) break;
+        since = lastId;
       }
-      final res = await _dio.get<Map<String, dynamic>>(
-        '/data',
-        queryParameters: query,
+      return all;
+    });
+  }
+
+  @override
+  Future<AckResponse> ackUpTo(int uptoId) {
+    return _withGatewayNetwork(() async {
+      final res = await _dio.get<dynamic>(
+        '/ack',
+        queryParameters: {'upto': uptoId},
       );
-      final list = (res.data?['readings'] as List<dynamic>? ?? []);
-      return list
-          .map((e) => GatewayReadingDto.fromJson(e as Map<String, dynamic>))
-          .toList();
+      _ensureOk(res, '/ack');
+      if (res.data is Map) {
+        return AckResponse.fromJson(Map<String, dynamic>.from(res.data as Map));
+      }
+      return AckResponse(acked: uptoId > 0 ? 1 : 0, status: 'ok');
     });
   }
 
   @override
   Future<AckResponse> ack(AckRequest request) {
+    if (request.uptoId != null) {
+      return ackUpTo(request.uptoId!);
+    }
+    // Fallback for older firmwares that expect POST JSON.
     return _withGatewayNetwork(() async {
-      final res = await _dio.post<Map<String, dynamic>>(
-        '/ack',
-        data: request.toJson(),
+      final payloads = <Object>[
+        request.toJson(),
+        {
+          'records': request.records
+              .map((r) => {'boot_id': r.bootId, 'seq': r.seq})
+              .toList(),
+        },
+      ];
+      Object? lastBody;
+      int? lastCode;
+      for (final body in payloads) {
+        final res = await _dio.post<dynamic>('/ack', data: body);
+        lastCode = res.statusCode;
+        lastBody = res.data;
+        if (res.statusCode != null &&
+            res.statusCode! >= 200 &&
+            res.statusCode! < 300) {
+          if (res.data is Map) {
+            return AckResponse.fromJson(
+              Map<String, dynamic>.from(res.data as Map),
+            );
+          }
+          return const AckResponse(acked: 0, status: 'ok');
+        }
+      }
+      throw GatewayException(
+        'Gateway /ack failed (HTTP $lastCode). Body: $lastBody',
       );
-      return AckResponse.fromJson(res.data ?? {});
     });
   }
 
   @override
   Future<void> syncTime(int unixTimestamp) {
     return _withGatewayNetwork(() async {
-      await _dio.post<Map<String, dynamic>>(
+      // Sensor team contract: GET /time?epoch=<unix seconds>
+      final getRes = await _dio.get<dynamic>(
         '/time',
-        data: {'unix_timestamp': unixTimestamp},
+        queryParameters: {'epoch': unixTimestamp},
       );
+      if (getRes.statusCode != null &&
+          getRes.statusCode! >= 200 &&
+          getRes.statusCode! < 300) {
+        return;
+      }
+      // Legacy POST bodies for older firmware.
+      final attempts = <Object>[
+        {'epoch': unixTimestamp},
+        {'unix_timestamp': unixTimestamp},
+        {'timestamp': unixTimestamp},
+      ];
+      for (final body in attempts) {
+        final res = await _dio.post<dynamic>('/time', data: body);
+        if (res.statusCode != null &&
+            res.statusCode! >= 200 &&
+            res.statusCode! < 300) {
+          return;
+        }
+      }
+      throw GatewayException('Gateway /time not accepted');
     });
   }
+
+  @override
+  Future<void> setSendInterval(int seconds) {
+    final clamped = seconds.clamp(10, 3600);
+    return _withGatewayNetwork(() async {
+      final res = await _dio.get<dynamic>(
+        '/config',
+        queryParameters: {'interval': clamped},
+      );
+      _ensureOk(res, '/config');
+    });
+  }
+}
+
+int? _asInt(Object? value) {
+  if (value == null) return null;
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value.toString());
 }

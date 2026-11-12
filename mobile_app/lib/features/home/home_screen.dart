@@ -19,7 +19,7 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   AutoSyncController? _auto;
   VoidCallback? _autoListener;
-  AutoSyncPhase? _lastPhase;
+  bool _wasBusy = false;
 
   @override
   void initState() {
@@ -27,14 +27,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _auto = ref.read(autoSyncControllerProvider);
       _autoListener = () {
-        final phase = _auto!.snapshot.phase;
         final busy = _auto!.snapshot.busy;
-        // Refresh home data only when a sync cycle finishes, not while loading.
-        if (!busy && _lastPhase != phase) {
+        // Refresh pending/latest counts when a sync cycle finishes.
+        if (_wasBusy && !busy) {
           ref.invalidate(dashboardDataProvider);
         }
-        if (!busy) _lastPhase = phase;
-        // Always rebuild status text.
+        _wasBusy = busy;
         if (mounted) setState(() {});
       };
       _auto!.addListener(_autoListener!);
@@ -70,9 +68,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
           ),
           data: (data) {
-            final level = data.latest?.waterLevelMm;
-            final mountOk = data.station.mountHeightMm != null;
-            final measured = data.latest?.measurementTime;
+            final latest = data.latest;
+            final level = latest?.waterLevelMm ??
+                calculateWaterLevelMm(
+                  mountHeightMm: data.station.mountHeightMm,
+                  distanceMm: latest?.distanceMm,
+                );
+            final measured = latest?.measurementTime;
+            final distanceLabel = formatDistanceMeters(latest?.distanceMm);
+            final levelLabel = level == null
+                ? '—'
+                : (level / 1000).toStringAsFixed(2);
 
             return Padding(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
@@ -127,17 +133,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             ),
                           ),
                           const Spacer(),
-                          if (!mountOk)
-                            Text(
-                              'Setup needed',
-                              style: GoogleFonts.manrope(
-                                color: Colors.white,
-                                fontSize: 40,
-                                fontWeight: FontWeight.w800,
-                                height: 1.05,
-                              ),
-                            )
-                          else if (level == null)
+                          if (latest == null)
                             Text(
                               'No reading yet',
                               style: GoogleFonts.manrope(
@@ -149,10 +145,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             )
                           else ...[
                             Text(
-                              (level / 1000).toStringAsFixed(2),
+                              levelLabel,
                               style: GoogleFonts.manrope(
                                 color: Colors.white,
-                                fontSize: 72,
+                                fontSize: level == null ? 56 : 72,
                                 fontWeight: FontWeight.w800,
                                 height: 0.95,
                                 letterSpacing: -2,
@@ -166,24 +162,48 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
+                            const SizedBox(height: 14),
+                            Text(
+                              'Distance $distanceLabel',
+                              style: GoogleFonts.manrope(
+                                color: Colors.white70,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              'Raw  dist ${_rawMm(latest.distanceMm)}  ·  level ${_rawMm(level)}',
+                              style: GoogleFonts.manrope(
+                                color: Colors.white.withValues(alpha: 0.78),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            Text(
+                              'boot ${latest.bootId}  ·  seq ${latest.seq}  ·  ${latest.validSamples} samples',
+                              style: GoogleFonts.manrope(
+                                color: Colors.white.withValues(alpha: 0.55),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
                           ],
                           const Spacer(),
                           Text(
-                            !mountOk
-                                ? 'Open Advanced and enter mounting height once.'
-                                : measured == null
-                                    ? 'Walk near the station with this phone. Sync runs in the background.'
-                                    : 'Updated ${DateFormat('dd MMM, HH:mm').format(DateTime.fromMillisecondsSinceEpoch(measured * 1000))}',
+                            measured == null
+                                ? 'Connect to WaterLevel WiFi near the station to sync.'
+                                : 'Updated ${DateFormat('dd MMM, HH:mm').format(DateTime.fromMillisecondsSinceEpoch(measured * 1000))}',
                             style: GoogleFonts.manrope(
                               color: Colors.white70,
                               fontSize: 14,
                               height: 1.35,
                             ),
                           ),
-                          if (mountOk && data.latest != null) ...[
+                          if (latest != null) ...[
                             const SizedBox(height: 8),
                             Text(
-                              sensorStatusLabel(data.latest!.status),
+                              sensorStatusLabel(latest.status),
                               style: GoogleFonts.manrope(
                                 color: Colors.white,
                                 fontWeight: FontWeight.w700,
@@ -198,9 +218,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   _StatusCard(
                     busy: auto.snapshot.busy,
                     title: _titleFor(auto.snapshot, data.pendingCount),
-                    body: auto.snapshot.message,
+                    body: auto.snapshot.lastError != null
+                        ? '${auto.snapshot.message}\n${auto.snapshot.lastError}'
+                        : auto.snapshot.message,
                     pending: data.pendingCount,
                     simulated: data.usingMockGateway,
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton(
+                    onPressed: auto.snapshot.busy
+                        ? null
+                        : () async {
+                            await auto.runCycle(force: true);
+                            ref.invalidate(dashboardDataProvider);
+                          },
+                    child: const Text('Sync now'),
                   ),
                 ],
               ),
@@ -216,6 +248,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (snap.phase == AutoSyncPhase.error) return 'Needs attention';
     if (pending > 0) return 'Saved on phone';
     return 'All good';
+  }
+
+  String _rawMm(int? mm) {
+    if (mm == null || mm == 0xFFFF) return '—';
+    return '$mm mm';
   }
 }
 

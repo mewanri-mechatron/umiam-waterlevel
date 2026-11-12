@@ -134,6 +134,16 @@ body:has(.demo-strip:not(.hidden)) .stage {
   padding-bottom: 0.4em;
 }
 
+.raw-line {
+  position: relative;
+  z-index: 1;
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.72;
+}
+
 .when {
   position: relative;
   z-index: 1;

@@ -2,7 +2,8 @@
 
 Project database URL:
 
-`https://agri-db-fa27f-default-rtdb.asia-southeast1.firebasedatabase.app`
+`https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app`
+(Use the exact URL shown in Firebase Console → Realtime Database if your region differs.)
 
 ## Tree
 

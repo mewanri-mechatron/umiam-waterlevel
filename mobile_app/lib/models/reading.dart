@@ -106,17 +106,29 @@ class Reading {
         isSimulated: (map['is_simulated'] as int? ?? 0) == 1,
       );
 
-  Map<String, Object?> toFirebaseMap({required int uploadedAt}) => {
-        'boot_id': bootId,
-        'seq': seq,
-        'measurement_time': measurementTime,
-        'received_time': receivedTime,
-        'age_seconds': ageSeconds,
-        'distance_mm': distanceMm,
-        'water_level_mm': waterLevelMm,
-        'status': status,
-        'valid_samples': validSamples,
-        'send_interval_seconds': sendIntervalSeconds,
-        'uploaded_at': uploadedAt,
-      };
+  Map<String, Object?> toFirebaseMap({required int uploadedAt}) {
+    final map = <String, Object?>{
+      'boot_id': bootId,
+      'seq': seq,
+      'measurement_time': measurementTime,
+      'received_time': receivedTime,
+      'age_seconds': ageSeconds,
+      'status': status,
+      'valid_samples': validSamples,
+      'send_interval_seconds': sendIntervalSeconds,
+      'uploaded_at': uploadedAt,
+    };
+    // Omit nulls — RTDB treats null as delete.
+    if (distanceMm != null && distanceMm != AppConstants.unavailableMm) {
+      map['distance_mm'] = distanceMm;
+      map['distance_m'] =
+          double.parse((distanceMm! / 1000.0).toStringAsFixed(2));
+    }
+    if (waterLevelMm != null && waterLevelMm != AppConstants.unavailableMm) {
+      map['water_level_mm'] = waterLevelMm;
+      map['water_level_m'] =
+          double.parse((waterLevelMm! / 1000.0).toStringAsFixed(2));
+    }
+    return map;
+  }
 }

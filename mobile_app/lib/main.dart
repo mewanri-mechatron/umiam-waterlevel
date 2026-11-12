@@ -19,6 +19,7 @@ void callbackDispatcher() {
     try {
       final prefs = await SharedPreferences.getInstance();
       final useMock = prefs.getBool(AppConstants.prefsUseMockGateway) ?? false;
+      final reason = inputData?['reason'] as String? ?? 'all';
       // Shared singleton — never close from a background isolate.
       final db = AppDatabase.instance;
       final network = NetworkService();
@@ -34,9 +35,12 @@ void callbackDispatcher() {
         network: network,
       );
 
-      // Near ESP SoftAP → pull buffered readings.
       final onGateway = await network.isConnectedToGatewayWifi();
-      if (onGateway || useMock) {
+      final doPull = reason == 'pull' || reason == 'all';
+      final doUpload = reason == 'upload' || reason == 'all';
+
+      // Near ESP SoftAP → pull buffered readings (SiteSync binds SoftAP first).
+      if (doPull && (onGateway || useMock)) {
         try {
           if (onGateway) {
             await network.bindToGatewayNetwork();
@@ -44,15 +48,14 @@ void callbackDispatcher() {
           await sync.downloadFromGateway();
         } catch (_) {
           // SoftAP may drop; retry on next tick.
-        } finally {
-          if (onGateway) {
-            await network.clearNetworkBinding();
-          }
         }
       }
 
-      // Normal internet → push pending readings to Firebase.
-      if (await network.hasInternet()) {
+      // Cloud upload — SiteSyncService binds LTE before "upload" jobs.
+      if (doUpload) {
+        await network.bindToInternetNetwork();
+        // Attempt whenever this is an upload tick; native bind may already
+        // have switched the process off SoftAP onto cellular.
         await sync.uploadPendingToFirebase();
       }
       return true;
@@ -71,7 +74,9 @@ Future<void> main() async {
 
   await Workmanager().initialize(callbackDispatcher);
 
-  // Upload path when online.
+  // Android clamps periodic WorkManager to ~15 min minimum — useful as a
+  // backup only. Closed-app sync mainly relies on SiteSyncService (FGS),
+  // which enqueues a one-shot Flutter worker about once a minute.
   await Workmanager().registerPeriodicTask(
     AppConstants.syncWorkName,
     AppConstants.syncWorkName,
@@ -80,7 +85,6 @@ Future<void> main() async {
     existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
   );
 
-  // Site path: also runs without internet so SoftAP pulls can happen.
   await Workmanager().registerPeriodicTask(
     AppConstants.siteSyncWorkName,
     AppConstants.siteSyncWorkName,
@@ -107,10 +111,8 @@ Future<void> main() async {
     await prefs.setBool(AppConstants.prefsSiteSyncEnabled, true);
   }
 
-  if (await network.hasInternet()) {
-    // ignore: unawaited_futures
-    container.read(syncServiceProvider).uploadPendingToFirebase();
-  }
+  // Do not fire a parallel upload here — AutoSyncController owns the first
+  // cycle and overlapping uploads caused "Upload already in progress" errors.
 
   runApp(
     UncontrolledProviderScope(

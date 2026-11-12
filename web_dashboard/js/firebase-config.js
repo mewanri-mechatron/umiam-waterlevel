@@ -1,14 +1,14 @@
-// Replace with your Firebase web app config for project agri-db-fa27f.
-// Leave useDemo true / config incomplete to run clearly labeled demo mode.
+// Firebase web config for project **umiam-waterlevel**.
 window.WATERLEVEL_FIREBASE = {
-  useDemo: true,
+  useDemo: false,
   config: {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "agri-db-fa27f.firebaseapp.com",
-    databaseURL: "https://agri-db-fa27f-default-rtdb.asia-southeast1.firebasedatabase.app",
-    projectId: "agri-db-fa27f",
-    storageBucket: "agri-db-fa27f.appspot.com",
-    messagingSenderId: "YOUR_SENDER_ID",
-    appId: "YOUR_APP_ID"
+    apiKey: "AIzaSyDqyanCUqGkhuVS-43d9Q5z42iUN0e_ccg",
+    authDomain: "umiam-waterlevel.firebaseapp.com",
+    databaseURL: "https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "umiam-waterlevel",
+    storageBucket: "umiam-waterlevel.firebasestorage.app",
+    messagingSenderId: "435036676231",
+    appId: "1:435036676231:web:d90fc054887668c2331822",
+    measurementId: "G-RGZQBP0JWQ"
   }
 };

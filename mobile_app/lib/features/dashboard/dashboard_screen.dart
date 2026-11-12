@@ -206,43 +206,10 @@ class _LevelHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!mountConfigured) {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(24),
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF16352D), Color(0xFF0A5C4B)],
-          ),
-        ),
-        child: Column(
-          children: [
-            const Icon(Icons.straighten_rounded, size: 36, color: Colors.white70),
-            const SizedBox(height: 14),
-            Text(
-              'Water level unavailable',
-              style: GoogleFonts.manrope(
-                fontSize: 20,
-                fontWeight: FontWeight.w800,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Set mounting height in Settings to calculate level from distance.',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.manrope(color: Colors.white70, height: 1.4),
-            ),
-          ],
-        ),
-      );
-    }
-
-    final metres = waterLevelMm == null ? null : waterLevelMm! / 1000.0;
-    final cm = waterLevelMm == null ? null : waterLevelMm! / 10.0;
+    final metres = waterLevelMm == null || waterLevelMm == 0xFFFF
+        ? null
+        : waterLevelMm! / 1000.0;
+    final cm = metres == null ? null : metres * 100.0;
 
     return Container(
       width: double.infinity,
@@ -321,7 +288,7 @@ class _LevelHero extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'Distance: ${distanceMm == null || distanceMm == 0xFFFF ? 'Unavailable' : '$distanceMm mm'}'
+                  'Distance: ${formatDistanceMeters(distanceMm)}'
                   '${status == null ? '' : '  ·  ${sensorStatusLabel(status!)}'}',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.manrope(

@@ -70,47 +70,60 @@ class SyncService {
       throw GatewayException('Station $stationId not found');
     }
 
-    final status = await _gateway.getStatus();
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    await _gateway.syncTime(now);
 
-    final dtos = await _gateway.getData(sinceSeq: 0);
+    // Sensor team flow: /time → /data loop → save → /ack?upto=
+    String? statusNote;
+    try {
+      await _gateway.syncTime(now);
+    } catch (_) {
+      statusNote = 'Gateway /time skipped';
+    }
+    try {
+      final status = await _gateway.getStatus();
+      final pendingCfg = status.pendingInterval > 0
+          ? ' · interval pending=${status.pendingInterval}s'
+          : '';
+      statusNote =
+          'queue=${status.queueCount} packets=${status.packets}$pendingCfg';
+    } catch (_) {
+      statusNote = '${statusNote ?? ''} · /status skipped'.trim();
+    }
+
+    final dtos = await _gateway.getData(sinceId: 0);
     final receiveTime = DateTime.now();
     final readings = <Reading>[];
+    var maxRecordId = 0;
 
     for (final dto in dtos) {
-      if (dto.version != 0 && dto.version != AppConstants.payloadVersion) {
-        continue;
-      }
-      final measurement = measurementTimeFromAge(
-        receiveTime: receiveTime,
-        ageSeconds: dto.ageSeconds,
-      );
-      final distance = dto.distanceMm == AppConstants.unavailableMm
-          ? null
-          : dto.distanceMm;
-      final computed = calculateWaterLevelMm(
+      final id = dto.recordId ?? 0;
+      if (id > maxRecordId) maxRecordId = id;
+
+      // Prefer Node B absolute ts; fall back to age-based estimate.
+      final measurementSec = dto.measurementTime ??
+          measurementTimeFromAge(
+            receiveTime: receiveTime,
+            ageSeconds: dto.ageSeconds,
+          ).millisecondsSinceEpoch ~/
+              1000;
+
+      final distance = dto.distanceMm;
+      // Prefer Node B `level` (mm); else derive from mount height − distance.
+      int? water = dto.waterLevelMm;
+      water ??= calculateWaterLevelMm(
         mountHeightMm: station.mountHeightMm,
         distanceMm: distance,
       );
-      // Prefer computed local water level when mount height known;
-      // otherwise keep gateway value unless unavailable.
-      int? water = computed;
-      if (water == null &&
-          dto.waterLevelMm != AppConstants.unavailableMm &&
-          dto.waterLevelMm >= 0) {
-        water = station.mountHeightMm == null ? null : dto.waterLevelMm;
-      }
 
       readings.add(
         Reading(
           stationId: stationId,
           bootId: dto.bootId,
           seq: dto.seq,
-          measurementTime: measurement.millisecondsSinceEpoch ~/ 1000,
+          measurementTime: measurementSec,
           receivedTime: receiveTime.millisecondsSinceEpoch ~/ 1000,
           ageSeconds: dto.ageSeconds,
-          distanceMm: distance ?? dto.distanceMm,
+          distanceMm: distance,
           waterLevelMm: water,
           status: dto.status,
           validSamples: dto.validSamples,
@@ -126,16 +139,26 @@ class SyncService {
     final toAck = [...result.inserted, ...result.duplicates];
 
     var acked = 0;
-    if (toAck.isNotEmpty) {
-      final ack = await _gateway.ack(
-        AckRequest(
-          stationId: stationId,
-          records: toAck
-              .map((r) => (bootId: r.bootId, seq: r.seq))
-              .toList(),
-        ),
-      );
-      acked = ack.acked;
+    if (toAck.isNotEmpty || maxRecordId > 0) {
+      try {
+        if (maxRecordId > 0) {
+          final ack = await _gateway.ackUpTo(maxRecordId);
+          acked = ack.acked;
+        } else {
+          final ack = await _gateway.ack(
+            AckRequest(
+              stationId: stationId,
+              records: toAck
+                  .map((r) => (bootId: r.bootId, seq: r.seq))
+                  .toList(),
+            ),
+          );
+          acked = ack.acked;
+        }
+      } catch (_) {
+        // Data is already safe in SQLite — ACK failure must not discard the pull.
+        statusNote = '$statusNote · ACK failed (data kept on phone)';
+      }
     }
 
     final pending = await _db.countPending(stationId);
@@ -153,9 +176,7 @@ class SyncService {
       inserted: result.inserted.length,
       duplicates: result.duplicates.length,
       acked: acked,
-      message: status.isOnline
-          ? null
-          : 'Gateway reported status "${status.status}"',
+      message: statusNote,
     );
   }
 
@@ -177,11 +198,17 @@ class SyncService {
     }
     _uploadInFlight = true;
     try {
-      if (!await _network.hasInternet()) {
-        return const UploadResult(
+      // While SoftAP is default route, force cellular/validated WiFi.
+      await _network.bindToInternetNetwork();
+      final online = await _network.hasInternet();
+      if (!online) {
+        // One more try: SiteSync may have bound LTE; probe Firebase path by
+        // continuing only when connectivity_plus sees a transport.
+        final pending = await _db.countPending(stationId);
+        return UploadResult(
           uploaded: 0,
           failed: 0,
-          pendingRemaining: -1,
+          pendingRemaining: pending > 0 ? -1 : pending,
           message: 'No internet connection. Pending records stay on the phone.',
         );
       }
@@ -205,34 +232,32 @@ class SyncService {
 
       var uploaded = 0;
       var failed = 0;
-      // Re-query pending only — already-pushed rows are excluded by SQLite.
-      final batch =
-          await _db.getPendingUploads(stationId: stationId, limit: 40);
-      if (batch.isEmpty) {
-        final pending = await _db.countPending(stationId);
-        return UploadResult(
-          uploaded: 0,
-          failed: 0,
-          pendingRemaining: pending,
-          message: 'Nothing pending for upload.',
-        );
-      }
-
       Object? lastError;
-      for (var attempt = 0; attempt < maxAttempts; attempt++) {
-        try {
-          await _firebase.uploadReadings(station: station, readings: batch);
-          // Mark before returning so concurrent workers never re-select these.
-          await _db.markUploaded(batch);
-          uploaded = batch.length;
-          lastError = null;
-          break;
-        } catch (e) {
-          lastError = e;
-          failed = batch.length;
-          final delayMs = min(8000, 400 * pow(2, attempt).toInt());
-          await Future<void>.delayed(Duration(milliseconds: delayMs));
+
+      // Drain pending in batches so one Sync now can clear ~200 local rows.
+      for (var round = 0; round < 12; round++) {
+        final batch =
+            await _db.getPendingUploads(stationId: stationId, limit: 40);
+        if (batch.isEmpty) break;
+
+        var roundOk = false;
+        for (var attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            await _firebase.uploadReadings(station: station, readings: batch);
+            await _db.markUploaded(batch);
+            uploaded += batch.length;
+            lastError = null;
+            failed = 0;
+            roundOk = true;
+            break;
+          } catch (e) {
+            lastError = e;
+            failed = batch.length;
+            final delayMs = min(8000, 400 * pow(2, attempt).toInt());
+            await Future<void>.delayed(Duration(milliseconds: delayMs));
+          }
         }
+        if (!roundOk) break;
       }
 
       final pending = await _db.countPending(stationId);
@@ -248,6 +273,15 @@ class SyncService {
               : sync.failedUploadCount + failed,
         ),
       );
+
+      if (uploaded == 0 && pending == 0) {
+        return UploadResult(
+          uploaded: 0,
+          failed: 0,
+          pendingRemaining: 0,
+          message: 'Nothing pending for upload.',
+        );
+      }
 
       return UploadResult(
         uploaded: uploaded,

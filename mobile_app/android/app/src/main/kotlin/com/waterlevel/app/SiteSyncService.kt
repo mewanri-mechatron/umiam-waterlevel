@@ -1,5 +1,6 @@
 package com.waterlevel.app
 
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,103 +12,231 @@ import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
-import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import dev.fluttercommunity.workmanager.BackgroundWorker
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Keeps a low-priority notification and periodically wakes the Flutter WorkManager
- * sync callback so the phone can pull from the ESP SoftAP / upload without the UI open.
+ * Foreground service: pull SoftAP → bind LTE → native Firebase upload.
+ * Holds CPU/WiFi wake locks during each cycle so lock-screen / Doze does not
+ * freeze the upload mid-flight. Next cycle is scheduled with an exact alarm
+ * that is allowed while idle.
  */
 class SiteSyncService : Service() {
     private val handler = Handler(Looper.getMainLooper())
-    private val tickMs = 90_000L
+    private val executor = Executors.newSingleThreadExecutor()
+    private val cycleRunning = AtomicBoolean(false)
+    private val tickMs = 75_000L
 
-    private val tick = object : Runnable {
-        override fun run() {
-            maybeEnqueueSync()
-            handler.postDelayed(this, tickMs)
-        }
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): android.os.IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        val notification = buildNotification("Watching for WaterLevel WiFi…")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIF_ID,
-                notification,
+                buildNotification("Watching for WaterLevel WiFi…"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
             )
         } else {
-            startForeground(NOTIF_ID, notification)
+            startForeground(NOTIF_ID, buildNotification("Watching for WaterLevel WiFi…"))
         }
-        handler.post(tick)
+        startCycle()
+        scheduleNextAlarm()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                cancelNextAlarm()
                 stopSelf()
                 return START_NOT_STICKY
             }
-            else -> maybeEnqueueSync()
+            ACTION_TICK, null -> {
+                startCycle()
+                scheduleNextAlarm()
+            }
+            else -> {
+                startCycle()
+                scheduleNextAlarm()
+            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(tick)
+        cancelNextAlarm()
+        executor.shutdownNow()
         super.onDestroy()
     }
 
-    private fun maybeEnqueueSync() {
-        val ssid = currentSsid()
-        val onGateway = ssid == GATEWAY_SSID
-        // Always nudge WorkManager; Dart side decides download vs upload.
-        enqueueFlutterSync()
-        val text = when {
-            onGateway -> "On WaterLevel · pulling sensor data"
-            else -> "Standby · near station or on internet to sync"
+    private fun startCycle() {
+        if (!cycleRunning.compareAndSet(false, true)) {
+            Log.i(TAG, "cycle already running — skip")
+            return
         }
-        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIF_ID, buildNotification(text))
+        executor.execute {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            val wake = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "WaterLevel:SiteSync",
+            ).apply { setReferenceCounted(false) }
+            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            val wifiLock = wifi.createWifiLock(
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "WaterLevel:SiteSyncWifi",
+            ).apply { setReferenceCounted(false) }
+            try {
+                wake.acquire(3 * 60_000L)
+                try {
+                    wifiLock.acquire()
+                } catch (_: Throwable) {
+                    // Some OEMs restrict WifiLock; continue with CPU lock only.
+                }
+                runSyncPhasesBlocking()
+            } catch (t: Throwable) {
+                Log.e(TAG, "cycle failed", t)
+            } finally {
+                try {
+                    if (wifiLock.isHeld) wifiLock.release()
+                } catch (_: Throwable) {
+                }
+                try {
+                    if (wake.isHeld) wake.release()
+                } catch (_: Throwable) {
+                }
+                cycleRunning.set(false)
+            }
+        }
     }
 
-    private fun enqueueFlutterSync() {
-        val input = Data.Builder()
-            .putString(BackgroundWorker.DART_TASK_KEY, DART_TASK)
-            .build()
-        val request = OneTimeWorkRequestBuilder<BackgroundWorker>()
-            .setInputData(input)
-            .addTag(WORK_TAG)
-            .build()
-        WorkManager.getInstance(applicationContext).enqueueUniqueWork(
-            WORK_NAME,
-            ExistingWorkPolicy.KEEP,
-            request,
+    private fun runSyncPhasesBlocking() {
+        val onGateway = NetworkBinder.isOnGateway(applicationContext)
+        Log.i(TAG, "cycle start onGateway=$onGateway")
+
+        if (onGateway) {
+            NetworkBinder.bindToGateway(applicationContext)
+            updateNotification("On WaterLevel · pulling sensor data")
+            enqueueFlutterSync("pull")
+            sleepQuiet(18_000)
+        }
+
+        val bound = NetworkBinder.bindToInternet(applicationContext)
+        Log.i(
+            TAG,
+            "upload phase bindInternet=$bound validated=${NetworkBinder.hasValidatedInternet(applicationContext)}",
+        )
+        if (!bound && !NetworkBinder.hasValidatedInternet(applicationContext)) {
+            updateNotification("Waiting for internet (LTE/WiFi) to upload…")
+            Log.i(TAG, "cycle done — no internet for upload")
+            return
+        }
+
+        updateNotification("Uploading pending readings over mobile/data…")
+        val native = NativeCloudUploader.uploadPending(applicationContext)
+        Log.i(TAG, "native upload: ${native.message} uploaded=${native.uploaded} left=${native.pendingLeft}")
+        enqueueFlutterSync("upload")
+        sleepQuiet(3_000)
+
+        updateNotification(
+            when {
+                native.uploaded > 0 && native.pendingLeft == 0 ->
+                    "Cloud up to date · sent ${native.uploaded}"
+                native.uploaded > 0 ->
+                    "Sent ${native.uploaded} · ${native.pendingLeft} still pending"
+                native.pendingLeft == 0 ->
+                    "Cloud up to date"
+                NetworkBinder.isOnGateway(applicationContext) ->
+                    "On WaterLevel · ${native.pendingLeft} waiting for next upload"
+                else ->
+                    "Online · ${native.pendingLeft} pending (${native.message})"
+            },
+        )
+        Log.i(TAG, "cycle done")
+    }
+
+    private fun scheduleNextAlarm() {
+        val am = getSystemService(ALARM_SERVICE) as AlarmManager
+        val pi = tickPendingIntent()
+        val triggerAt = SystemClock.elapsedRealtime() + tickMs
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            } else {
+                @Suppress("DEPRECATION")
+                am.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+            }
+            Log.i(TAG, "next tick in ${tickMs}ms (exact alarm)")
+        } catch (t: Throwable) {
+            Log.w(TAG, "exact alarm failed, falling back to handler", t)
+            handler.removeCallbacksAndMessages(null)
+            handler.postDelayed({
+                startCycle()
+                scheduleNextAlarm()
+            }, tickMs)
+        }
+    }
+
+    private fun cancelNextAlarm() {
+        val am = getSystemService(ALARM_SERVICE) as AlarmManager
+        am.cancel(tickPendingIntent())
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    private fun tickPendingIntent(): PendingIntent {
+        val intent = Intent(this, SiteSyncService::class.java).setAction(ACTION_TICK)
+        return PendingIntent.getService(
+            this,
+            42,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
 
-    private fun currentSsid(): String? {
-        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        @Suppress("DEPRECATION")
-        val info = wifi.connectionInfo ?: return null
-        @Suppress("DEPRECATION")
-        var ssid = info.ssid ?: return null
-        if (ssid == "<unknown ssid>") return null
-        if (ssid.startsWith("\"") && ssid.endsWith("\"")) {
-            ssid = ssid.substring(1, ssid.length - 1)
+    private fun enqueueFlutterSync(reason: String) {
+        val input = Data.Builder()
+            .putString(BackgroundWorker.DART_TASK_KEY, DART_TASK)
+            .putString("reason", reason)
+            .build()
+        val builder = OneTimeWorkRequestBuilder<BackgroundWorker>()
+            .setInputData(input)
+            .addTag(WORK_TAG)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
         }
-        return ssid
+        WorkManager.getInstance(applicationContext).enqueueUniqueWork(
+            "$WORK_NAME-$reason",
+            ExistingWorkPolicy.REPLACE,
+            builder.build(),
+        )
+        Log.i(TAG, "enqueued Flutter sync reason=$reason")
+    }
+
+    private fun sleepQuiet(ms: Long) {
+        try {
+            Thread.sleep(ms)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun updateNotification(text: String) {
+        handler.post {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            nm.notify(NOTIF_ID, buildNotification(text))
+        }
     }
 
     private fun createChannel() {
@@ -117,7 +246,7 @@ class SiteSyncService : Service() {
             "WaterLevel auto sync",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Pulls dam readings when near the station and uploads when online"
+            description = "Pulls dam readings near the station and uploads when online"
         }
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(channel)
@@ -149,10 +278,11 @@ class SiteSyncService : Service() {
     }
 
     companion object {
+        private const val TAG = "SiteSyncService"
         const val CHANNEL_ID = "waterlevel_site_sync"
         const val NOTIF_ID = 4201
         const val ACTION_STOP = "com.waterlevel.app.STOP_SITE_SYNC"
-        const val GATEWAY_SSID = "WaterLevel"
+        const val ACTION_TICK = "com.waterlevel.app.SITE_SYNC_TICK"
         const val WORK_NAME = "waterlevel_site_sync_once"
         const val WORK_TAG = "waterlevel_site_sync"
         const val DART_TASK = "waterlevel_site_sync"

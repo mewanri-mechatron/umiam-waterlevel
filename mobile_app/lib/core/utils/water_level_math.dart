@@ -13,11 +13,21 @@ int? calculateWaterLevelMm({
 
 String formatLevelMeters(int? waterLevelMm) {
   if (waterLevelMm == null || waterLevelMm == AppConstants.unavailableMm) {
-    return 'Unavailable';
+    return '—';
   }
-  final metres = waterLevelMm / 1000.0;
-  final cm = waterLevelMm / 10.0;
-  return '${metres.toStringAsFixed(2)} m (${cm.toStringAsFixed(0)} cm)';
+  return '${(waterLevelMm / 1000.0).toStringAsFixed(2)} m';
+}
+
+String formatDistanceMeters(int? distanceMm) {
+  if (distanceMm == null || distanceMm == AppConstants.unavailableMm) {
+    return '—';
+  }
+  return '${(distanceMm / 1000.0).toStringAsFixed(2)} m';
+}
+
+double? mmToMetres(int? mm) {
+  if (mm == null || mm == AppConstants.unavailableMm) return null;
+  return double.parse((mm / 1000.0).toStringAsFixed(2));
 }
 
 String sensorStatusLabel(int status) {
@@ -25,9 +35,9 @@ String sensorStatusLabel(int status) {
     case 0:
       return 'OK';
     case 1:
-      return 'Too close / blind zone';
+      return 'Too close (<0.28 m)';
     case 2:
-      return 'No echo / out of range';
+      return 'No echo';
     case 3:
       return 'Sensor not responding';
     default:

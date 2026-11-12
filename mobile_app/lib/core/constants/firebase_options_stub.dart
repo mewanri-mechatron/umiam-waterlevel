@@ -1,18 +1,17 @@
 import 'package:firebase_core/firebase_core.dart';
 
-/// Placeholder Firebase options for project agri-db-fa27f.
-/// Replace with real values from the Firebase console / FlutterFire CLI
-/// before enabling live cloud sync.
+/// Firebase options for project **umiam-waterlevel**.
+/// Values taken from `android/app/google-services.json`.
 class DefaultFirebaseOptions {
-  static const bool isConfigured = false;
+  static const bool isConfigured = true;
 
   static FirebaseOptions get currentPlatform => const FirebaseOptions(
-        apiKey: 'YOUR_API_KEY',
-        appId: 'YOUR_ANDROID_APP_ID',
-        messagingSenderId: 'YOUR_SENDER_ID',
-        projectId: 'agri-db-fa27f',
+        apiKey: 'AIzaSyBHAQdfBcowfRfcEga0eqC95ADL-9KXtYM',
+        appId: '1:435036676231:android:34afd9c60a373f30331822',
+        messagingSenderId: '435036676231',
+        projectId: 'umiam-waterlevel',
         databaseURL:
-            'https://agri-db-fa27f-default-rtdb.asia-southeast1.firebasedatabase.app',
-        storageBucket: 'agri-db-fa27f.appspot.com',
+            'https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app',
+        storageBucket: 'umiam-waterlevel.firebasestorage.app',
       );
 }

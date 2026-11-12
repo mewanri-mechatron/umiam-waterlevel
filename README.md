@@ -1,141 +1,207 @@
 # WaterLevel — Umiam Dam
 
-Offline-first water-level monitoring for a site with **no internet at the sensor**.
+Offline-first water-level monitoring (no internet at the sensor).
 
 ```
-Node A (STM + sensor + LoRa)
-        │ LoRa
-        ▼
-Node B (ESP + LoRa SoftAP "WaterLevel")
-        │ WiFi SoftAP (no internet)
-        ▼
-Android phone app  ──SQLite──►  (later, on mobile data / WiFi)
-        │
-        ▼
-Firebase Realtime Database
-        │
-        ▼
-Web dashboard (read-only)
+Node A (STM + LoRa) → Node B (ESP SoftAP) → Phone app → Firebase → Web dashboard
 ```
 
-| Piece | Role |
-|-------|------|
-| **Node A** | Measures water level; sends over LoRa |
-| **Node B** | Receives LoRa, buffers readings, serves them on SoftAP `WaterLevel` / `192.168.4.1` |
-| **Phone app** | Near Node B → pulls readings; later online → uploads to Firebase |
-| **Web dashboard** | Shows live / historical level from Firebase |
+**Firebase project:** `umiam-waterlevel`  
+**ESP WiFi:** SSID `WaterLevel` · password `12345678` · IP `192.168.4.1`
 
 ---
 
-## What field users do
+## Exact setup (do in order)
 
-1. Install the app and **open it once** (allow notifications / WiFi prompts if asked).
-2. Carry the phone **near the dam station** (Node B). The app prefers SSID `WaterLevel` and pulls buffered readings in the background.
-3. When the phone later has normal internet, pending readings upload to Firebase automatically.
-4. Anyone can open the web dashboard to view Umiam Dam levels.
+You only need to do this **once**.
 
-**Advanced** (gear) is only a fallback: **Connect to WaterLevel WiFi** if auto-join fails.
+### Step 1 — Open your Firebase project
 
-Do **not** force-stop the app. Some OEM battery savers can delay background sync — allow WaterLevel to run in the background if prompted.
-
----
-
-## Repository layout
-
-| Path | Purpose |
-|------|---------|
-| `mobile_app/` | Flutter Android field app |
-| `web_dashboard/` | Read-only web UI (ApexCharts) |
-| `shared/` | Protocol / API / schema docs |
-| `firebase/` | RTDB rules + Hosting config |
+1. Go to [https://console.firebase.google.com/](https://console.firebase.google.com/)
+2. Open project **`umiam-waterlevel`**
+3. If the project does not exist yet: **Add project** → name it `umiam-waterlevel` → continue through the wizard (Google Analytics optional)
 
 ---
 
-## One-time setup checklist
+### Step 2 — Create Realtime Database
 
-### 1. Hardware (field)
+1. Left menu → **Build** → **Realtime Database**
+2. Click **Create Database**
+3. Prefer region **`asia-southeast1`** (Singapore) if offered
+4. Start in **locked mode** (OK — we deploy our rules next)
+5. After it is created, copy the database URL at the top.  
+   It usually looks like:  
+   `https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app`  
+   If your URL is different, use **your** URL everywhere below.
 
-- [ ] Node A powered and measuring on its interval  
-- [ ] Node B powered, LoRa link from Node A OK  
-- [ ] Node B SoftAP visible as **`WaterLevel`**, HTTP at **`http://192.168.4.1`**  
-- [ ] Mount height known (default in app DB: **5000 mm** for Umiam)
+---
 
-### 2. Firebase project (`agri-db-fa27f`)
+### Step 3 — Turn on Anonymous sign-in
 
-In [Firebase Console](https://console.firebase.google.com/):
+1. Left menu → **Build** → **Authentication**
+2. Click **Get started** (if first time)
+3. Open **Sign-in method**
+4. Click **Anonymous** → enable → **Save**
 
-1. **Realtime Database** — create/use the Asia Southeast instance  
-   `https://agri-db-fa27f-default-rtdb.asia-southeast1.firebasedatabase.app`
-2. **Authentication → Sign-in method** → enable **Anonymous**
-3. Deploy database rules from this repo:
+The phone app signs in anonymously so it can **write** readings.
+
+---
+
+### Step 4 — Deploy database rules from this repo
+
+On your PC (in a terminal):
 
 ```bash
-cd firebase
+npm install -g firebase-tools
+cd d:\Projects\UmiamProject\firebase
 firebase login
-firebase use agri-db-fa27f
+firebase use umiam-waterlevel
 firebase deploy --only database
 ```
 
-4. **Android app**
-   - Add Android app with package name: `com.waterlevel.app`
-   - Download **`google-services.json`**
-   - Place it at: `mobile_app/android/app/google-services.json`
-
-5. **Fill Flutter Firebase options**  
-   Edit `mobile_app/lib/core/constants/firebase_options_stub.dart`:
-   - Set `isConfigured = true`
-   - Replace `apiKey`, `appId`, `messagingSenderId` (and bucket if needed) with values from the Firebase console / `google-services.json`  
-   Or run FlutterFire configure and point the app at the generated options.
-
-6. **Web app**
-   - Add a Web app in the same Firebase project  
-   - Edit `web_dashboard/js/firebase-config.js`:
-     - Put the web config values in `config`
-     - Set `useDemo: false`
-
-Without steps 4–6, the phone still stores data locally, and the web UI stays in **labeled demo mode**.
-
-### 3. Build & install the phone app
-
-Requirements: Flutter SDK, Android SDK, a phone with USB debugging (or sideload the APK).
+If `firebase use` says the project is unknown:
 
 ```bash
-cd mobile_app
-flutter pub get
-flutter analyze
-flutter test
-flutter build apk --release
+firebase projects:list
+firebase use umiam-waterlevel
 ```
 
-APK:
+Rules file used: `firebase/database.rules.json`  
+(Web can **read** `/water`; only signed-in phones can **write**.)
 
-`mobile_app/build/app/outputs/flutter-apk/app-release.apk`
+---
 
-Install on the field phone, open once, allow:
+### Step 5 — Register the Android app
 
-- Notifications (background sync status)
-- Location / Nearby Wi‑Fi (needed on many Androids to see SoftAP SSID)
-- Battery unrestricted / “allow background activity” if the OEM asks
+1. Firebase Console → project overview (gear) → **Project settings**
+2. Under **Your apps** → **Add app** → **Android**
+3. Android package name (must match exactly):
 
-### 4. Web dashboard
+   ```
+   com.waterlevel.app
+   ```
 
-**Local preview**
+4. App nickname: `WaterLevel` (optional)
+5. Click **Register app**
+6. Download **`google-services.json`**
+7. Put that file here (exact path):
+
+   ```
+   d:\Projects\UmiamProject\mobile_app\android\app\google-services.json
+   ```
+
+8. Still in **Project settings** → your Android app → copy:
+   - `apiKey`
+   - `appId` (looks like `1:123456:android:...`)
+   - `messagingSenderId` (numbers)
+   - `projectId` → should be `umiam-waterlevel`
+   - Realtime Database URL from Step 2
+
+9. Open:
+
+   `mobile_app/lib/core/constants/firebase_options_stub.dart`
+
+10. Paste those values, then set:
+
+    ```dart
+    static const bool isConfigured = true;
+    ```
+
+    Example shape (use **your** real values):
+
+    ```dart
+    static const bool isConfigured = true;
+
+    static FirebaseOptions get currentPlatform => const FirebaseOptions(
+          apiKey: 'AIza...',
+          appId: '1:....:android:....',
+          messagingSenderId: '123456789',
+          projectId: 'umiam-waterlevel',
+          databaseURL: 'https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app',
+          storageBucket: 'umiam-waterlevel.appspot.com',
+        );
+    ```
+
+---
+
+### Step 6 — Register the Web app (dashboard)
+
+1. Firebase Console → **Project settings** → **Add app** → **Web** (`</>`)
+2. Nickname: `WaterLevel Dashboard`
+3. You can skip Hosting for now (or enable it — optional)
+4. Copy the `firebaseConfig` object Firebase shows you
+5. Open:
+
+   `web_dashboard/js/firebase-config.js`
+
+6. Paste the values into `config`
+7. Set:
+
+   ```js
+   useDemo: false
+   ```
+
+---
+
+### Step 7 — Build and install the phone app
+
+1. Connect your Android phone with USB debugging **or** plan to copy the APK
+2. In a terminal:
 
 ```bash
-cd web_dashboard
+cd d:\Projects\UmiamProject\mobile_app
+flutter pub get
+flutter build apk --debug
+```
+
+3. APK path:
+
+   `mobile_app\build\app\outputs\flutter-apk\app-debug.apk`
+
+4. Install it on the phone, open the app **once**, and allow:
+   - Notifications
+   - Location / Nearby devices (needed to see WiFi name)
+   - Background / battery unrestricted if asked
+
+---
+
+### Step 8 — Test near the ESP
+
+1. Phone Wi‑Fi → join **`WaterLevel`** / password **`12345678`**  
+   (or app → gear → **Connect to WaterLevel WiFi**)
+2. Stay near Node B; app should pull readings onto the phone
+3. Switch phone back to normal mobile data / home Wi‑Fi
+4. Wait for upload (or reopen the app)
+5. In Firebase Console → **Realtime Database**, you should see:
+
+   ```
+   water/
+     readings/station_001/...
+     latest/station_001/...
+   ```
+
+---
+
+### Step 9 — Open the web dashboard
+
+**On your PC:**
+
+```bash
+cd d:\Projects\UmiamProject\web_dashboard
 python -m http.server 8080
 ```
 
-Open `http://localhost:8080/`
+Open [http://localhost:8080/](http://localhost:8080/)
 
-**Production (Firebase Hosting)**
+- Yellow “Demo…” banner → `useDemo` is still true or web config incomplete  
+- No banner + real numbers → live Firebase data
+
+**Optional — publish online:**
 
 ```bash
-cd firebase
+cd d:\Projects\UmiamProject\firebase
 firebase deploy --only hosting
 ```
-
-Hosting serves `web_dashboard/` (see `firebase/firebase.json`).
 
 ---
 
@@ -146,44 +212,39 @@ Hosting serves `web_dashboard/` (see `firebase/firebase.json`).
 | Station ID | `station_001` |
 | Name | Umiam Dam |
 | SoftAP SSID | `WaterLevel` |
+| SoftAP password | `12345678` |
 | Gateway | `http://192.168.4.1` |
-| Mount height | `5000` mm (seeded in SQLite) |
-
-Reading identity (no duplicates): `station_id + boot_id + seq`  
-Firebase keys: `water/readings/<station_id>/<boot_id>_<seq>`  
-Already-uploaded rows stay marked in SQLite and are **not** pushed again.
+| Mount height | `5000` mm |
 
 ---
 
-## Developer / demo notes
+## What is done vs what you do next
 
-- Web with `useDemo: true` (or incomplete Firebase web config) shows a yellow **demo** banner and sample data.
-- Phone mock gateway: set SharedPreferences `use_mock_gateway` = true only for UI testing without Node B. Default is **real ESP**.
-- Protocol docs: [shared/sensor_protocol.md](shared/sensor_protocol.md), [shared/gateway_api.md](shared/gateway_api.md), [shared/firebase_schema.md](shared/firebase_schema.md)
-
-### Architecture rules
-
-1. SQLite on the phone is primary; Firebase is the cloud mirror.  
-2. Never ACK Node B readings before SQLite commit.  
-3. Never delete historical readings after upload.  
-4. Demo/mock data must never be shown as live field data.  
-5. Node A LoRa packet format is fixed — do not change it.
+| Item | Status |
+|------|--------|
+| App + web code | Done in this repo |
+| ESP SoftAP name/password known | Done |
+| Firebase project `umiam-waterlevel` | **You create / configure (Steps 1–6)** |
+| `google-services.json` + options filled | **You** |
+| Web `useDemo: false` + web config | **You** |
+| Install APK + first open | **You** |
+| Field test with Node B | **You** |
 
 ---
 
-## Security (MVP)
+## Repo layout
 
-- Web reads `/water` publicly (read-only dashboard).  
-- Phone writes require Firebase Auth (anonymous).  
-- Before a public production rollout, add App Check and tighter auth.
+| Path | Purpose |
+|------|---------|
+| `mobile_app/` | Flutter Android field app |
+| `web_dashboard/` | Read-only web UI |
+| `shared/` | Protocol docs |
+| `firebase/` | Database rules + Hosting |
 
 ---
 
-## Quick verify
+## Notes
 
-| Check | Expected |
-|-------|----------|
-| Phone near Node B on `WaterLevel` | App pulls readings; home shows a level |
-| Phone back on mobile data / Wi‑Fi | Pending count drops; Firebase `water/readings/station_001` grows |
-| Dashboard with `useDemo: false` | Live Umiam level + chart (no demo banner) |
-| Advanced → Connect manually | System Wi‑Fi prompt for SoftAP if auto-join failed |
+- Phone stores data in SQLite first; Firebase is the cloud copy. Already-uploaded readings are not sent again.
+- Do not force-stop the app if you want background sync.
+- `google-services.json` is gitignored (keep it on your machine only).

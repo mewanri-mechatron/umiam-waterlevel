@@ -37,14 +37,70 @@ function fmtTs(sec) {
   return new Date(Number(sec) * 1000).toLocaleString();
 }
 
-function fmtLevel(mm) {
-  if (mm == null || mm === 65535) return "Unavailable";
-  return (mm / 1000).toFixed(2);
+function levelMetres(row) {
+  if (row == null) return null;
+  if (row.water_level_m != null && row.water_level_m !== "") {
+    const m = Number(row.water_level_m);
+    return Number.isFinite(m) ? m : null;
+  }
+  const mm = row.water_level_mm;
+  if (mm == null || mm === 65535) return null;
+  return Number(mm) / 1000;
 }
 
-function fmtDistance(mm) {
-  if (mm == null || mm === 65535) return "Unavailable";
-  return `${mm} mm`;
+function distanceMetres(row) {
+  if (row == null) return null;
+  if (row.distance_m != null && row.distance_m !== "") {
+    const m = Number(row.distance_m);
+    return Number.isFinite(m) ? m : null;
+  }
+  const mm = row.distance_mm;
+  if (mm == null || mm === 65535) return null;
+  return Number(mm) / 1000;
+}
+
+function fmtLevel(rowOrMm) {
+  const m =
+    typeof rowOrMm === "object"
+      ? levelMetres(rowOrMm)
+      : rowOrMm == null || rowOrMm === 65535
+        ? null
+        : Number(rowOrMm) / 1000;
+  return m == null || !Number.isFinite(m) ? "—" : m.toFixed(2);
+}
+
+function fmtDistance(rowOrMm) {
+  const m =
+    typeof rowOrMm === "object"
+      ? distanceMetres(rowOrMm)
+      : rowOrMm == null || rowOrMm === 65535
+        ? null
+        : Number(rowOrMm) / 1000;
+  return m == null || !Number.isFinite(m) ? "—" : `${m.toFixed(2)} m`;
+}
+
+function fmtRawMm(mm) {
+  if (mm == null || mm === "" || Number(mm) === 65535) return "—";
+  const n = Number(mm);
+  return Number.isFinite(n) ? `${Math.round(n)} mm` : "—";
+}
+
+function rawDistanceMm(row) {
+  if (row == null) return null;
+  if (row.distance_mm != null && Number(row.distance_mm) !== 65535) {
+    return Number(row.distance_mm);
+  }
+  if (row.distance_m != null) return Math.round(Number(row.distance_m) * 1000);
+  return null;
+}
+
+function rawLevelMm(row) {
+  if (row == null) return null;
+  if (row.water_level_mm != null && Number(row.water_level_mm) !== 65535) {
+    return Number(row.water_level_mm);
+  }
+  if (row.water_level_m != null) return Math.round(Number(row.water_level_m) * 1000);
+  return null;
 }
 
 function parseReadingMap(map) {
@@ -79,13 +135,41 @@ function updateHeaderStatus(conn) {
     el.textContent = "Demo";
     return;
   }
+  // Link = Firebase connection status
   el.textContent = conn === "connected" ? "Live" : "Offline";
+}
+
+function fmtAgeCounter(ageSec) {
+  if (ageSec == null || !Number.isFinite(ageSec) || ageSec < 0) return "—";
+  const s = Math.floor(ageSec);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m ago`;
+}
+
+function renderFreshnessCounter() {
+  const latest = state.latest;
+  const el = $("cardFreshness");
+  if (!el) return;
+  if (!latest) {
+    el.textContent = "No data";
+    return;
+  }
+  // Prefer cloud upload time, else measurement time.
+  const ts = Number(latest.uploaded_at || latest.measurement_time);
+  if (!Number.isFinite(ts) || ts <= 0) {
+    el.textContent = "—";
+    return;
+  }
+  el.textContent = fmtAgeCounter(Date.now() / 1000 - ts);
 }
 
 function renderOverview() {
   const latest = state.latest;
   const levelEl = $("cardLevel");
-  const next = latest ? `${fmtLevel(latest.water_level_mm)}` : "—";
+  const next = latest ? fmtLevel(latest) : "—";
   if (levelEl.textContent !== next) {
     levelEl.style.animation = "none";
     // restart CSS rise animation
@@ -94,31 +178,36 @@ function renderOverview() {
   }
   levelEl.textContent = next;
 
-  $("cardDistance").textContent = latest ? fmtDistance(latest.distance_mm) : "—";
+  $("cardDistance").textContent = latest ? fmtDistance(latest) : "—";
+  $("cardLevelRaw").textContent = latest
+    ? `Raw level ${fmtRawMm(rawLevelMm(latest))}`
+    : "Raw level —";
+  $("cardDistanceRaw").textContent = latest
+    ? fmtRawMm(rawDistanceMm(latest))
+    : "—";
+  $("cardLevelRawStat").textContent = latest
+    ? fmtRawMm(rawLevelMm(latest))
+    : "—";
   $("cardMeasured").textContent = latest
     ? `Updated ${fmtTs(latest.measurement_time)}`
     : "Waiting for first reading";
   $("cardSensor").textContent = latest
     ? SENSOR_STATUS[latest.status] || `Code ${latest.status}`
     : "—";
-  $("cardUpload").textContent = latest
-    ? new Date(Number(latest.uploaded_at || latest.received_time) * 1000).toLocaleTimeString()
-    : "—";
 
   const interval = latest?.send_interval_seconds || 30;
   const age = latest ? Date.now() / 1000 - Number(latest.measurement_time) : null;
   const threshold = interval * 4;
+  renderFreshnessCounter();
   if (age == null) {
-    $("cardFreshness").textContent = "No data";
     $("dataStatusShort").textContent = "Waiting";
   } else if (latest.status !== 0) {
-    $("cardFreshness").textContent = `${Math.round(age)}s ago`;
     $("dataStatusShort").textContent = SENSOR_STATUS[latest.status] || "Error";
+  } else if (levelMetres(latest) == null) {
+    $("dataStatusShort").textContent = "No level";
   } else if (age <= threshold) {
-    $("cardFreshness").textContent = `${Math.round(age)}s ago`;
     $("dataStatusShort").textContent = "Normal";
   } else {
-    $("cardFreshness").textContent = `${Math.round(age / 60)}m ago`;
     $("dataStatusShort").textContent = "Delayed";
   }
 }
@@ -127,11 +216,15 @@ function chartSeries() {
   return filteredReadings()
     .slice()
     .sort((a, b) => a.measurement_time - b.measurement_time)
-    .filter((r) => r.water_level_mm != null && r.water_level_mm !== 65535)
-    .map((r) => ({
-      x: Number(r.measurement_time) * 1000,
-      y: Number((r.water_level_mm / 1000).toFixed(3))
-    }));
+    .map((r) => {
+      const y = levelMetres(r);
+      if (y == null) return null;
+      return {
+        x: Number(r.measurement_time) * 1000,
+        y: Number(y.toFixed(3))
+      };
+    })
+    .filter(Boolean);
 }
 
 function chartHeight() {
@@ -267,7 +360,9 @@ function renderTable() {
     .map(
       (r) => `<tr>
       <td>${fmtTs(r.measurement_time)}</td>
-      <td>${fmtLevel(r.water_level_mm)} m</td>
+      <td>${fmtLevel(r)} m</td>
+      <td>${fmtRawMm(rawDistanceMm(r))}</td>
+      <td>${fmtRawMm(rawLevelMm(r))}</td>
       <td>${SENSOR_STATUS[r.status] || r.status}</td>
     </tr>`
     )
@@ -352,6 +447,8 @@ async function boot() {
     state.latest = latest;
     refreshViews();
   });
+  // Live freshness counter (seconds since last cloud update).
+  setInterval(renderFreshnessCounter, 1000);
   await loadStationData();
 }
 
