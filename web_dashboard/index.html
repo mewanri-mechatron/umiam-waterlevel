@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Umiam Dam · WaterLevel</title>
+  <link rel="stylesheet" href="css/styles.css?v=41" />
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@4.5.0/dist/apexcharts.min.js"></script>
+</head>
+<body>
+  <div id="demoBanner" class="demo-strip hidden">Demo sample data — not live dam readings</div>
+
+  <div class="stage">
+    <header class="top">
+      <section class="level-card" aria-label="Current water level">
+        <p class="level-label">Current water level</p>
+        <div class="level-row">
+          <p id="cardLevel" class="level">—</p>
+          <span class="unit">m</span>
+        </div>
+        <p id="cardMeasured" class="when">—</p>
+      </section>
+
+      <section class="station-card" aria-label="Station status">
+        <div class="station-head">
+          <p class="brand">WaterLevel</p>
+          <h1>Umiam Dam</h1>
+          <p class="tagline">Meghalaya reservoir</p>
+        </div>
+        <div class="hero-stats">
+          <div><span>Distance</span><strong id="cardDistance">—</strong></div>
+          <div><span>Sensor</span><strong id="cardSensor">—</strong></div>
+          <div><span>Condition</span><strong id="dataStatusShort">—</strong></div>
+          <div><span>Cloud</span><strong id="cardUpload">—</strong></div>
+          <div><span>Freshness</span><strong id="cardFreshness">—</strong></div>
+          <div><span>Link</span><strong id="firebaseStatus">…</strong></div>
+        </div>
+      </section>
+    </header>
+
+    <section class="lower">
+      <div class="chart-panel">
+        <div class="panel-top">
+          <h2>Level trend</h2>
+          <div class="range" role="group" aria-label="Range">
+            <button data-range="24h" class="range-btn active">24h</button>
+            <button data-range="7d" class="range-btn">7d</button>
+            <button data-range="30d" class="range-btn">30d</button>
+            <button id="exportCsv" class="export">CSV</button>
+          </div>
+        </div>
+        <div class="chart-host">
+          <div id="levelChart"></div>
+        </div>
+      </div>
+
+      <div class="list-panel">
+        <div class="panel-top">
+          <h2>Recent readings</h2>
+          <span id="pageInfo" class="count"></span>
+        </div>
+        <div class="table-wrap">
+          <table id="readingsTable">
+            <thead>
+              <tr>
+                <th data-sort="measurement_time">Time</th>
+                <th data-sort="water_level_mm">Level</th>
+                <th data-sort="status">Status</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="prevPage">Prev</button>
+          <button id="nextPage">Next</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="js/firebase-config.js?v=41"></script>
+  <script src="js/demo-data.js?v=41"></script>
+  <script type="module" src="js/firebase.js?v=41"></script>
+  <script type="module" src="js/app.js?v=41"></script>
+</body>
+</html>

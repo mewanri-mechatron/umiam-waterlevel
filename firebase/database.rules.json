@@ -1,0 +1,31 @@
+{
+  "rules": {
+    "water": {
+      ".read": true,
+      "stations": {
+        "$stationId": {
+          ".write": "auth != null",
+          ".validate": "newData.hasChildren(['name']) && (!newData.hasChild('mount_height_mm') || newData.child('mount_height_mm').isNumber())"
+        }
+      },
+      "readings": {
+        "$stationId": {
+          "$readingKey": {
+            ".write": "auth != null && (!data.exists() || data.val() == newData.val())",
+            ".validate": "newData.hasChildren(['boot_id', 'seq', 'measurement_time', 'received_time', 'status']) && newData.child('boot_id').isNumber() && newData.child('seq').isNumber() && newData.child('measurement_time').isNumber() && newData.child('received_time').isNumber() && newData.child('status').isNumber()"
+          }
+        }
+      },
+      "latest": {
+        "$stationId": {
+          ".write": "auth != null",
+          ".validate": "newData.hasChildren(['boot_id', 'seq', 'measurement_time', 'status'])"
+        }
+      }
+    },
+    "$other": {
+      ".read": false,
+      ".write": false
+    }
+  }
+}

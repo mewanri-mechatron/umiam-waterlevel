@@ -1,0 +1,61 @@
+{
+  "station_id": "station_001",
+  "note": "Sample / demo readings only — not field measurements",
+  "readings": [
+    {
+      "version": 180,
+      "boot_id": 10,
+      "seq": 100,
+      "age_seconds": 5,
+      "distance_mm": 1200,
+      "water_level_mm": 3800,
+      "status": 0,
+      "valid_samples": 5,
+      "send_interval_seconds": 30
+    },
+    {
+      "version": 180,
+      "boot_id": 10,
+      "seq": 101,
+      "age_seconds": 8,
+      "distance_mm": 1180,
+      "water_level_mm": 3820,
+      "status": 0,
+      "valid_samples": 5,
+      "send_interval_seconds": 30
+    },
+    {
+      "version": 180,
+      "boot_id": 10,
+      "seq": 102,
+      "age_seconds": 12,
+      "distance_mm": 1250,
+      "water_level_mm": 3750,
+      "status": 0,
+      "valid_samples": 4,
+      "send_interval_seconds": 30
+    },
+    {
+      "version": 180,
+      "boot_id": 10,
+      "seq": 103,
+      "age_seconds": 20,
+      "distance_mm": 65535,
+      "water_level_mm": 65535,
+      "status": 2,
+      "valid_samples": 0,
+      "send_interval_seconds": 30
+    },
+    {
+      "version": 180,
+      "boot_id": 11,
+      "seq": 1,
+      "age_seconds": 4,
+      "distance_mm": 1300,
+      "water_level_mm": 3700,
+      "status": 0,
+      "valid_samples": 5,
+      "send_interval_seconds": 30
+    }
+  ]
+}
