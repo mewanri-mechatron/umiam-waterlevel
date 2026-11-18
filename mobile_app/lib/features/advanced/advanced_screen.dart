@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../app/providers.dart';
@@ -164,6 +165,12 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
               fontWeight: FontWeight.w600,
             ),
           ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () => context.push('/audit'),
+            icon: const Icon(Icons.receipt_long_outlined),
+            label: const Text('Open audit log'),
+          ),
           const SizedBox(height: 14),
           Material(
             color: Colors.white,
@@ -305,6 +312,21 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                               _note = null;
                             });
                             final net = ref.read(networkServiceProvider);
+                            final wifi = await net.ensureWifiEnabled();
+                            if (wifi == 'prompt') {
+                              if (!mounted) return;
+                              setState(() {
+                                _busy = false;
+                                _note =
+                                    'WiFi is off. Turn it on in the system panel, then tap Connect again.';
+                              });
+                              return;
+                            }
+                            if (wifi == 'enabling') {
+                              await Future<void>.delayed(
+                                const Duration(seconds: 2),
+                              );
+                            }
                             final msg =
                                 await net.requestGatewayWifiConnection();
                             await ref

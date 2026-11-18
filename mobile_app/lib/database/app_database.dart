@@ -41,7 +41,7 @@ class AppDatabase {
     final path = p.join(dbPath, 'water_level.db');
     return openDatabase(
       path,
-      version: 1,
+      version: 2,
       singleInstance: true,
       onCreate: (db, version) async {
         await db.execute('''
@@ -93,6 +93,7 @@ CREATE TABLE sync_state (
   failed_upload_count INTEGER NOT NULL DEFAULT 0
 )
 ''');
+        await _createAuditLogTable(db);
 
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         await db.insert('stations', {
@@ -111,7 +112,63 @@ CREATE TABLE sync_state (
           'failed_upload_count': 0,
         });
       },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await _createAuditLogTable(db);
+        }
+      },
     );
+  }
+
+  static Future<void> _createAuditLogTable(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at INTEGER NOT NULL,
+  level TEXT NOT NULL,
+  category TEXT NOT NULL,
+  message TEXT NOT NULL,
+  detail TEXT
+)
+''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC)',
+    );
+  }
+
+  Future<void> insertAuditLog({
+    required String level,
+    required String category,
+    required String message,
+    String? detail,
+  }) async {
+    final db = await database;
+    await db.insert('audit_log', {
+      'created_at': DateTime.now().millisecondsSinceEpoch,
+      'level': level,
+      'category': category,
+      'message': message,
+      'detail': detail,
+    });
+    // Keep last 500 rows.
+    await db.rawDelete(
+      'DELETE FROM audit_log WHERE id NOT IN '
+      '(SELECT id FROM audit_log ORDER BY id DESC LIMIT 500)',
+    );
+  }
+
+  Future<List<Map<String, Object?>>> getAuditLogs({int limit = 200}) async {
+    final db = await database;
+    return db.query(
+      'audit_log',
+      orderBy: 'created_at DESC',
+      limit: limit,
+    );
+  }
+
+  Future<void> clearAuditLogs() async {
+    final db = await database;
+    await db.delete('audit_log');
   }
 
   Future<Station?> getStation(String id) async {

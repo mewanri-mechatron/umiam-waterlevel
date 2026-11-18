@@ -234,10 +234,11 @@ class SyncService {
       var failed = 0;
       Object? lastError;
 
-      // Drain pending in batches so one Sync now can clear ~200 local rows.
-      for (var round = 0; round < 12; round++) {
+      // Drain all pending. Firebase multi-path updates stay reliable in
+      // ~100-row chunks (payload size / timeout); keep looping until empty.
+      for (var round = 0; round < 200; round++) {
         final batch =
-            await _db.getPendingUploads(stationId: stationId, limit: 40);
+            await _db.getPendingUploads(stationId: stationId, limit: 100);
         if (batch.isEmpty) break;
 
         var roundOk = false;

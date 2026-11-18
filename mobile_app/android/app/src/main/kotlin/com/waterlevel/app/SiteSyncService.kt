@@ -123,6 +123,19 @@ class SiteSyncService : Service() {
     }
 
     private fun runSyncPhasesBlocking() {
+        // Best-effort WiFi enable (Android 10+ often ignores this silently).
+        try {
+            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            if (!wifi.isWifiEnabled) {
+                @Suppress("DEPRECATION")
+                wifi.setWifiEnabled(true)
+                sleepQuiet(2_000)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not enable WiFi from service", t)
+        }
+
         val onGateway = NetworkBinder.isOnGateway(applicationContext)
         Log.i(TAG, "cycle start onGateway=$onGateway")
 

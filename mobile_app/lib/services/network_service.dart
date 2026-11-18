@@ -10,12 +10,33 @@ class NetworkService {
   NetworkService({
     Connectivity? connectivity,
     MethodChannel? wifiChannel,
+    EventChannel? wifiEvents,
   })  : _connectivity = connectivity ?? Connectivity(),
         _wifiChannel = wifiChannel ??
-            const MethodChannel('com.waterlevel.app/wifi');
+            const MethodChannel('com.waterlevel.app/wifi'),
+        _wifiEvents = wifiEvents ??
+            const EventChannel('com.waterlevel.app/wifi_events');
 
   final Connectivity _connectivity;
   final MethodChannel _wifiChannel;
+  final EventChannel _wifiEvents;
+
+  StreamSubscription<dynamic>? _eventSub;
+  final _gatewayEvents = StreamController<Map<String, dynamic>>.broadcast();
+
+  /// SoftAP connect / lost events from Android (WifiNetworkSpecifier).
+  Stream<Map<String, dynamic>> get onGatewayEvents {
+    _ensureEventListen();
+    return _gatewayEvents.stream;
+  }
+
+  void _ensureEventListen() {
+    _eventSub ??= _wifiEvents.receiveBroadcastStream().listen((raw) {
+      if (raw is Map) {
+        _gatewayEvents.add(raw.map((k, v) => MapEntry(k.toString(), v)));
+      }
+    });
+  }
 
   Stream<List<ConnectivityResult>> get onConnectivityChanged =>
       _connectivity.onConnectivityChanged;
@@ -27,6 +48,29 @@ class NetworkService {
       // Ignore on unsupported platforms.
     } on PlatformException {
       // Ignore.
+    }
+  }
+
+  Future<bool> isWifiEnabled() async {
+    try {
+      final ok = await _wifiChannel.invokeMethod<bool>('isWifiEnabled');
+      return ok ?? true;
+    } on MissingPluginException {
+      return true;
+    } on PlatformException {
+      return true;
+    }
+  }
+
+  /// Returns `already_on`, `enabling`, or `prompt` (system WiFi panel opened).
+  Future<String> ensureWifiEnabled() async {
+    try {
+      final result = await _wifiChannel.invokeMethod<String>('ensureWifiEnabled');
+      return result ?? 'prompt';
+    } on MissingPluginException {
+      return 'already_on';
+    } on PlatformException catch (e) {
+      return e.message ?? 'prompt';
     }
   }
 
@@ -44,20 +88,75 @@ class NetworkService {
     return {};
   }
 
-  Future<bool> hasInternet() async {
-    // Prefer native check: SoftAP often advertises INTERNET but is not VALIDATED.
+  /// SoftAP check used by the home UI. Prefer native flags; fall back to HTTP.
+  Future<bool> isOnGatewayFast({bool allowHttpProbe = true}) async {
     try {
-      final native = await _wifiChannel.invokeMethod<bool>('hasValidatedInternet');
+      final ok = await _wifiChannel
+          .invokeMethod<bool>('isOnGateway')
+          .timeout(const Duration(milliseconds: 800));
+      if (ok == true) return true;
+    } on MissingPluginException {
+      // Fall through.
+    } on PlatformException {
+      // Fall through.
+    } on TimeoutException {
+      // Fall through.
+    }
+    try {
+      final diag = await wifiDiagnostics()
+          .timeout(const Duration(milliseconds: 800));
+      final ssid = (diag['ssid'] as String?)?.replaceAll('"', '');
+      if (ssid != null &&
+          ssid.toLowerCase() == AppConstants.gatewaySsid.toLowerCase()) {
+        return true;
+      }
+      if (diag['onGateway'] == true) return true;
+      if (diag['onGatewaySubnet'] == true) return true;
+      if (diag['gatewaySsidMatch'] == true) return true;
+      if (diag['localOnlyWifi'] == true) return true;
+    } catch (_) {}
+
+    if (!allowHttpProbe) return false;
+    try {
+      return await gatewayHttpReachable()
+          .timeout(const Duration(seconds: 2), onTimeout: () => false);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Peek only — never rebinds process traffic (safe for UI status polls).
+  Future<bool> peekHasInternet() async {
+    try {
+      final native =
+          await _wifiChannel.invokeMethod<bool>('hasValidatedInternet');
+      if (native == true) return true;
+    } on MissingPluginException {
+      // Fall through.
+    } on PlatformException {
+      // Fall through.
+    }
+    final results = await _connectivity.checkConnectivity();
+    return results.contains(ConnectivityResult.mobile) ||
+        results.contains(ConnectivityResult.ethernet) ||
+        (results.contains(ConnectivityResult.wifi) &&
+            !await isOnGatewayFast());
+  }
+
+  /// May rebind process to LTE for Firebase uploads. Do not call from UI polls.
+  Future<bool> hasInternet() async {
+    try {
+      final native =
+          await _wifiChannel.invokeMethod<bool>('hasValidatedInternet');
       if (native == true) {
         await bindToInternetNetwork();
         return true;
       }
       if (native == false) {
-        // Still try binding — LTE may be up even if the first probe raced.
         if (await bindToInternetNetwork()) return true;
       }
     } on MissingPluginException {
-      // Background isolate: SiteSyncService already bound LTE process-wide.
+      // Background isolate may already be bound.
     } on PlatformException {
       // Fall through.
     }
@@ -66,12 +165,11 @@ class NetworkService {
     if (results.contains(ConnectivityResult.none) || results.isEmpty) {
       return false;
     }
-    final onGateway = await isConnectedToGatewayWifi();
+    final onGateway = await isOnGatewayFast();
     final hasMobile = results.contains(ConnectivityResult.mobile);
     if (onGateway) {
       if (hasMobile) {
         final bound = await bindToInternetNetwork();
-        // true even if MethodChannel missing — FGS may already have bound LTE.
         return bound || hasMobile;
       }
       return false;
@@ -88,36 +186,26 @@ class NetworkService {
     return false;
   }
 
-  /// Bind process traffic to cellular / validated WiFi (not SoftAP).
   Future<bool> bindToInternetNetwork() async {
     try {
       final ok =
           await _wifiChannel.invokeMethod<bool>('bindToInternetNetwork');
       return ok ?? false;
     } on MissingPluginException {
-      await clearNetworkBinding();
       return false;
     } on PlatformException {
-      await clearNetworkBinding();
       return false;
     }
   }
 
-  /// True if SSID matches, phone has a 192.168.4.x address, or ESP /status answers.
-  Future<bool> isConnectedToGatewayWifi() async {
-    try {
-      final diag = await wifiDiagnostics();
-      final ssid = (diag['ssid'] as String?)?.replaceAll('"', '');
-      if (ssid == AppConstants.gatewaySsid) return true;
-      if (diag['onGatewaySubnet'] == true) return true;
-      if (diag['gatewaySsidMatch'] == true) return true;
-    } catch (_) {
-      // Continue with legacy SSID read.
-    }
+  /// True if SoftAP is up. Prefer [isOnGatewayFast]; HTTP probe is optional.
+  Future<bool> isConnectedToGatewayWifi({bool allowHttpProbe = false}) async {
+    if (await isOnGatewayFast()) return true;
 
     try {
       final ssid = await _wifiChannel.invokeMethod<String>('getWifiSsid');
-      if (ssid != null && ssid.replaceAll('"', '') == AppConstants.gatewaySsid) {
+      if (ssid != null &&
+          ssid.replaceAll('"', '') == AppConstants.gatewaySsid) {
         return true;
       }
     } on MissingPluginException {
@@ -126,7 +214,7 @@ class NetworkService {
       // Ignore.
     }
 
-    // Last resort: can we speak to the SoftAP HTTP server?
+    if (!allowHttpProbe) return false;
     return gatewayHttpReachable();
   }
 
@@ -135,27 +223,16 @@ class NetworkService {
       await bindToGatewayNetwork();
       final dio = Dio(
         BaseOptions(
-          connectTimeout: const Duration(seconds: 3),
-          receiveTimeout: const Duration(seconds: 3),
+          connectTimeout: const Duration(seconds: 2),
+          receiveTimeout: const Duration(seconds: 2),
           validateStatus: (_) => true,
         ),
       );
-      final res = await dio.get<dynamic>('${AppConstants.gatewayBaseUrl}/status');
+      final res =
+          await dio.get<dynamic>('${AppConstants.gatewayBaseUrl}/status');
       return res.statusCode != null && res.statusCode! < 500;
     } catch (_) {
-      try {
-        final dio = Dio(
-          BaseOptions(
-            connectTimeout: const Duration(seconds: 3),
-            receiveTimeout: const Duration(seconds: 3),
-            validateStatus: (_) => true,
-          ),
-        );
-        final res = await dio.get<dynamic>('${AppConstants.gatewayBaseUrl}/');
-        return res.statusCode != null;
-      } catch (_) {
-        return false;
-      }
+      return false;
     }
   }
 
@@ -165,6 +242,7 @@ class NetworkService {
       };
 
   Future<String> requestGatewayWifiConnection() async {
+    _ensureEventListen();
     try {
       final result = await _wifiChannel.invokeMethod<String>(
         'connectToGatewayWifi',
@@ -234,5 +312,10 @@ class NetworkService {
     } on PlatformException {
       // Ignore.
     }
+  }
+
+  void dispose() {
+    unawaited(_eventSub?.cancel());
+    unawaited(_gatewayEvents.close());
   }
 }

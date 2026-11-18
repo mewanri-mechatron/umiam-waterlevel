@@ -26,11 +26,25 @@ object NetworkBinder {
 
     fun bindToGateway(context: Context): Boolean {
         val cm = connectivity(context)
-        // Prefer SoftAP subnet.
+        // Prefer SoftAP subnet / SSID match.
         for (network in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(network) ?: continue
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
             if (isSoftApNetwork(context, network, caps) && cm.bindProcessToNetwork(network)) {
+                boundNetwork = network
+                return true
+            }
+        }
+        // Local-only WiFi (WifiNetworkSpecifier SoftAP has no INTERNET capability).
+        for (network in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(network) ?: continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            ) {
+                continue
+            }
+            if (cm.bindProcessToNetwork(network)) {
                 boundNetwork = network
                 return true
             }
@@ -49,7 +63,6 @@ object NetworkBinder {
     /** Bind to a validated internet path that is NOT the SoftAP. */
     fun bindToInternet(context: Context): Boolean {
         val cm = connectivity(context)
-        // Prefer cellular with validated internet.
         for (network in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(network) ?: continue
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) continue
@@ -60,19 +73,18 @@ object NetworkBinder {
                 return true
             }
         }
-        // Any other validated internet network that is not SoftAP.
         for (network in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(network) ?: continue
             if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
             if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) continue
             if (isSoftApNetwork(context, network, caps)) continue
+            if (isLocalOnlyWifi(caps)) continue
             if (cm.bindProcessToNetwork(network)) {
                 boundNetwork = network
                 return true
             }
         }
-        // Last resort: clear SoftAP sticky bind and hope the system picks LTE.
-        clearBinding(context)
+        // Do NOT clearProcessBinding — that drops WifiNetworkSpecifier SoftAP.
         return hasValidatedInternet(context)
     }
 
@@ -83,20 +95,66 @@ object NetworkBinder {
             if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
             if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) continue
             if (isSoftApNetwork(context, network, caps)) continue
+            if (isLocalOnlyWifi(caps)) continue
             return true
         }
         return false
     }
 
     fun isOnGateway(context: Context): Boolean {
+        // Most reliable on OEMs: WifiManager still has SoftAP IP/SSID even when
+        // ConnectivityManager hides ephemeral networks from the app.
+        if (wifiManagerLooksLikeSoftAp(context)) return true
+
         val ssid = currentSsid(context)
-        if (ssid == MainActivity.DEFAULT_SSID) return true
+        if (ssid != null && ssid.equals(MainActivity.DEFAULT_SSID, ignoreCase = true)) {
+            return true
+        }
         val cm = connectivity(context)
         for (network in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(network) ?: continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
             if (isSoftApNetwork(context, network, caps)) return true
+            // Specifier SoftAP: WiFi without INTERNET capability.
+            if (isLocalOnlyWifi(caps)) return true
+        }
+        // Active WiFi that is not validated often means SoftAP (status-bar WiFi + !).
+        val active = cm.activeNetwork
+        if (active != null) {
+            val caps = cm.getNetworkCapabilities(active)
+            if (caps != null &&
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            ) {
+                return true
+            }
         }
         return false
+    }
+
+    /** SoftAP DHCP is always 192.168.4.x for this project. */
+    private fun wifiManagerLooksLikeSoftAp(context: Context): Boolean {
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        @Suppress("DEPRECATION")
+        val info = wifi.connectionInfo
+        val ssid = normalizeSsid(info?.ssid)
+        if (ssid != null && ssid.equals(MainActivity.DEFAULT_SSID, ignoreCase = true)) {
+            return true
+        }
+        @Suppress("DEPRECATION")
+        val ip = info?.ipAddress ?: 0
+        if (ip != 0 && isSoftApIpv4LittleEndian(ip)) return true
+        @Suppress("DEPRECATION")
+        val gateway = wifi.dhcpInfo?.gateway ?: 0
+        if (gateway != 0 && isSoftApIpv4LittleEndian(gateway)) return true
+        return false
+    }
+
+    private fun isSoftApIpv4LittleEndian(ip: Int): Boolean {
+        val a = ip and 0xff
+        val b = (ip shr 8) and 0xff
+        val c = (ip shr 16) and 0xff
+        return a == 192 && b == 168 && c == 4
     }
 
     fun currentSsid(context: Context): String? {
@@ -119,13 +177,33 @@ object NetworkBinder {
 
     fun wifiDiagnostics(context: Context): Map<String, Any?> {
         val ips = ipv4Addresses(context)
+        val ssid = currentSsid(context)
         return mapOf(
-            "ssid" to currentSsid(context),
+            "ssid" to ssid,
             "ipv4" to ips,
             "onGatewaySubnet" to ips.any { it.startsWith("192.168.4.") },
-            "gatewaySsidMatch" to (currentSsid(context) == MainActivity.DEFAULT_SSID),
+            "gatewaySsidMatch" to (
+                ssid != null && ssid.equals(MainActivity.DEFAULT_SSID, ignoreCase = true)
+            ),
             "hasValidatedInternet" to hasValidatedInternet(context),
+            "onGateway" to isOnGateway(context),
+            "localOnlyWifi" to hasLocalOnlyWifi(context),
         )
+    }
+
+    private fun hasLocalOnlyWifi(context: Context): Boolean {
+        val cm = connectivity(context)
+        for (network in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(network) ?: continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+            if (isLocalOnlyWifi(caps)) return true
+        }
+        return false
+    }
+
+    private fun isLocalOnlyWifi(caps: NetworkCapabilities): Boolean {
+        if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return false
+        return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun isSoftApNetwork(
@@ -135,7 +213,10 @@ object NetworkBinder {
     ): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val info = caps.transportInfo as? WifiInfo
-            if (normalizeSsid(info?.ssid) == MainActivity.DEFAULT_SSID) return true
+            val ssid = normalizeSsid(info?.ssid)
+            if (ssid != null && ssid.equals(MainActivity.DEFAULT_SSID, ignoreCase = true)) {
+                return true
+            }
         }
         val cm = connectivity(context)
         val props = cm.getLinkProperties(network) ?: return false

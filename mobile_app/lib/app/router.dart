@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../features/advanced/advanced_screen.dart';
+import '../features/audit/audit_log_screen.dart';
 import '../features/home/home_screen.dart';
 
 final _rootKey = GlobalKey<NavigatorState>();
@@ -18,6 +19,10 @@ GoRouter createRouter() {
       GoRoute(
         path: '/advanced',
         builder: (context, state) => const AdvancedScreen(),
+      ),
+      GoRoute(
+        path: '/audit',
+        builder: (context, state) => const AuditLogScreen(),
       ),
     ],
   );

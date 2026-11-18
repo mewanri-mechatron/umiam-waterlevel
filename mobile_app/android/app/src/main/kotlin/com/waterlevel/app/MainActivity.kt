@@ -1,12 +1,8 @@
 package com.waterlevel.app
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
-import android.os.PowerManager
-import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -20,11 +16,13 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.plugins.add(WifiPlugin())
-        requestWifiPermissions()
-        maybeRequestBatteryExemption()
+        // Ask runtime permissions once; never auto-open battery / WiFi panels.
+        requestWifiPermissionsOnce()
     }
 
-    private fun requestWifiPermissions() {
+    private fun requestWifiPermissionsOnce() {
+        val prefs = getSharedPreferences("waterlevel_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("perms_asked", false)) return
         val needed = mutableListOf<String>()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
@@ -43,26 +41,9 @@ class MainActivity : FlutterActivity() {
         ) {
             needed.add(Manifest.permission.NEARBY_WIFI_DEVICES)
         }
+        prefs.edit().putBoolean("perms_asked", true).apply()
         if (needed.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, needed.toTypedArray(), 4401)
-        }
-    }
-
-    /** Locked-screen sync dies under OEM Doze unless battery optimization is off. */
-    private fun maybeRequestBatteryExemption() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        val pm = getSystemService(POWER_SERVICE) as PowerManager
-        if (pm.isIgnoringBatteryOptimizations(packageName)) return
-        try {
-            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = Uri.parse("package:$packageName")
-            }
-            startActivity(intent)
-        } catch (_: Throwable) {
-            try {
-                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-            } catch (_: Throwable) {
-            }
         }
     }
 

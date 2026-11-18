@@ -21,7 +21,8 @@ object NativeCloudUploader {
     private const val DB_URL =
         "https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app"
     private const val STATION_ID = "station_001"
-    private const val BATCH = 40
+    // Chunk size keeps each RTDB PATCH under practical size/timeout limits.
+    private const val BATCH = 100
 
     data class Result(val uploaded: Int, val pendingLeft: Int, val message: String)
 
@@ -48,7 +49,7 @@ object NativeCloudUploader {
             val station = readStation(db)
             var uploaded = 0
             var rounds = 0
-            while (rounds < 12) {
+            while (rounds < 200) {
                 rounds += 1
                 val batch = readPending(db, BATCH)
                 if (batch.isEmpty()) break

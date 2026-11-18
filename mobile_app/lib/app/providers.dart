@@ -8,6 +8,7 @@ import '../models/station.dart';
 import '../models/sync_state.dart';
 import '../repositories/reading_repository.dart';
 import '../repositories/station_repository.dart';
+import '../services/audit_log_service.dart';
 import '../services/auto_sync_controller.dart';
 import '../services/firebase_service.dart';
 import '../services/gateway_client.dart';
@@ -67,11 +68,22 @@ final syncServiceProvider = Provider<SyncService>((ref) {
   return service;
 });
 
-final autoSyncControllerProvider = Provider<AutoSyncController>((ref) {
+final auditLogServiceProvider = ChangeNotifierProvider<AuditLogService>((ref) {
+  return AuditLogService(ref.watch(appDatabaseProvider));
+});
+
+final autoSyncControllerProvider =
+    ChangeNotifierProvider<AutoSyncController>((ref) {
+  // IMPORTANT: use ref.read for dependencies. Watching ChangeNotifiers
+  // (especially audit log) was recreating+disposing this controller on every
+  // log line, which froze the home UI on Idle/Ready.
+  final db = ref.read(appDatabaseProvider);
   final controller = AutoSyncController(
-    syncService: ref.watch(syncServiceProvider),
-    networkService: ref.watch(networkServiceProvider),
+    syncService: ref.read(syncServiceProvider),
+    networkService: ref.read(networkServiceProvider),
+    auditLog: ref.read(auditLogServiceProvider),
     isDemoMode: () => ref.read(useMockGatewayProvider),
+    pendingCountLoader: () => db.countPending(AppConstants.defaultStationId),
   );
   ref.onDispose(controller.dispose);
   return controller;
@@ -130,13 +142,13 @@ class DashboardDataNotifier extends AsyncNotifier<DashboardData> {
     final sync = await db.getSyncState(station.id);
     final pending = await db.countPending(station.id);
 
-    // Platform WiFi checks can hang on some devices — bound them.
-    final online = await network.hasInternet().timeout(
-      const Duration(seconds: 2),
+    // Peek only — never rebind SoftAP away during a dashboard reload.
+    final online = await network.peekHasInternet().timeout(
+      const Duration(seconds: 1),
       onTimeout: () => false,
     );
-    final onGateway = await network.isConnectedToGatewayWifi().timeout(
-      const Duration(seconds: 2),
+    final onGateway = await network.isOnGatewayFast().timeout(
+      const Duration(seconds: 1),
       onTimeout: () => false,
     );
 
