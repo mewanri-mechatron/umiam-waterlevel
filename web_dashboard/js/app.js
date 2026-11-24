@@ -333,26 +333,15 @@ function syncRangeButtons() {
 
 function updateHeaderStatus(conn) {
   const el = $("firebaseStatus");
-  const badge = $("badgeLive");
   if (!el) return;
   if (conn === "demo" || isDemoMode) {
     el.innerHTML = `<span class="status-dot" style="background:#b45309"></span> Demo`;
-    if (badge) {
-      badge.className = "badge badge-warn";
-      badge.innerHTML = `<span class="dot"></span> Demo`;
-    }
     return;
   }
   const live = conn === "connected";
   el.innerHTML = live
     ? `<span class="status-dot" style="background:#15803d"></span> Live`
     : `<span class="status-dot" style="background:#b45309"></span> Offline`;
-  if (badge) {
-    badge.className = live ? "badge badge-success" : "badge badge-warn";
-    badge.innerHTML = live
-      ? `<span class="dot"></span> Live`
-      : `<span class="dot"></span> Offline`;
-  }
 }
 
 function renderFreshnessCounter() {
@@ -546,34 +535,22 @@ function renderOverview() {
   const threshold = Math.max(120, (interval || 30) * 4);
   const zone = zoneForFeet(levelFt);
   let condition = "Waiting";
-  let badgeClass = "badge badge-muted";
   if (age == null) {
     condition = "Waiting";
   } else if (latest.status !== 0) {
     condition = SENSOR_STATUS[latest.status] || "Error";
-    badgeClass = "badge badge-warn";
   } else if (levelFt == null) {
     condition = "No level";
-    badgeClass = "badge badge-warn";
   } else if (zone.key === "crit") {
     condition = "Critical";
-    badgeClass = "badge badge-danger";
   } else if (zone.key === "warn") {
     condition = "Warning";
-    badgeClass = "badge badge-warn";
   } else if (age > threshold) {
     condition = "Delayed";
-    badgeClass = "badge badge-warn";
   } else {
     condition = "Safe";
-    badgeClass = "badge badge-success";
   }
   $("dataStatusShort").textContent = condition;
-  const badge = $("badgeCondition");
-  if (badge) {
-    badge.className = badgeClass;
-    badge.textContent = condition;
-  }
 
   renderFreshnessCounter();
   renderChartSummary();
