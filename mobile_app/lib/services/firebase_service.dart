@@ -72,8 +72,84 @@ class FirebaseService {
     await ensureSignedIn();
     await _database!.ref('water/stations/${station.id}').update({
       'name': station.name,
-      if (station.mountHeightMm != null) 'mount_height_mm': station.mountHeightMm,
+      if (station.calibActualMm != null) 'calib_actual_mm': station.calibActualMm,
+      if (station.calibRawLevelMm != null)
+        'calib_raw_level_mm': station.calibRawLevelMm,
+      if (station.calibDistanceMm != null)
+        'calib_distance_mm': station.calibDistanceMm,
       'last_updated': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    });
+  }
+
+  /// Station metadata from cloud (calibration snapshot).
+  Future<
+      ({
+        String? name,
+        int? calibActualMm,
+        int? calibRawLevelMm,
+        int? calibDistanceMm,
+      })?> fetchStationMeta(
+    String stationId,
+  ) async {
+    await ensureSignedIn();
+    final snap = await _database!.ref('water/stations/$stationId').get();
+    if (!snap.exists || snap.value is! Map) return null;
+    final map = Map<Object?, Object?>.from(snap.value as Map);
+    return (
+      name: map['name'] as String?,
+      calibActualMm: (map['calib_actual_mm'] as num?)?.toInt(),
+      calibRawLevelMm: (map['calib_raw_level_mm'] as num?)?.toInt(),
+      calibDistanceMm: (map['calib_distance_mm'] as num?)?.toInt(),
+    );
+  }
+
+  /// Historical readings previously uploaded by this (or another) phone.
+  /// Returns the full station node (newest first). No client-side truncate.
+  Future<List<Reading>> fetchReadings({
+    required String stationId,
+  }) async {
+    await ensureSignedIn();
+    final snap = await _database!.ref('water/readings/$stationId').get();
+    if (!snap.exists || snap.value is! Map) return const [];
+    final root = Map<Object?, Object?>.from(snap.value as Map);
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final out = <Reading>[];
+    for (final entry in root.entries) {
+      if (entry.value is! Map) continue;
+      final map = Map<Object?, Object?>.from(entry.value as Map);
+      final reading = Reading.fromFirebaseMap(
+        stationId: stationId,
+        map: map,
+        createdAt: now,
+      );
+      if (reading.bootId == 0 &&
+          reading.seq == 0 &&
+          reading.measurementTime == 0) {
+        continue;
+      }
+      out.add(reading);
+    }
+    out.sort((a, b) => b.measurementTime.compareTo(a.measurementTime));
+    return out;
+  }
+
+  /// Best-effort mirror of a phone audit line into RTDB.
+  Future<void> uploadAuditLog({
+    required String stationId,
+    required String level,
+    required String category,
+    required String message,
+    String? detail,
+    required int createdAtMs,
+  }) async {
+    await ensureSignedIn();
+    final ref = _database!.ref('water/audit/$stationId').push();
+    await ref.set({
+      'created_at': createdAtMs,
+      'level': level,
+      'category': category,
+      'message': message,
+      if (detail != null && detail.isNotEmpty) 'detail': detail,
     });
   }
 
@@ -88,7 +164,12 @@ class FirebaseService {
 
     for (final reading in readings) {
       updates['water/readings/${station.id}/${reading.firebaseKey}'] =
-          reading.toFirebaseMap(uploadedAt: uploadedAt);
+          reading.toFirebaseMap(
+        uploadedAt: uploadedAt,
+        calibActualMm: station.calibActualMm,
+        calibRawLevelMm: station.calibRawLevelMm,
+        calibDistanceMm: station.calibDistanceMm,
+      );
     }
 
     final latestSnap =
@@ -127,7 +208,12 @@ class FirebaseService {
 
     if (shouldUpdateLatest) {
       updates['water/latest/${station.id}'] = {
-        ...newest.toFirebaseMap(uploadedAt: uploadedAt),
+        ...newest.toFirebaseMap(
+          uploadedAt: uploadedAt,
+          calibActualMm: station.calibActualMm,
+          calibRawLevelMm: station.calibRawLevelMm,
+          calibDistanceMm: station.calibDistanceMm,
+        ),
       };
     }
 
@@ -136,7 +222,11 @@ class FirebaseService {
     // and that aborts the entire multi-path update (readings never land).
     updates['water/stations/${station.id}'] = {
       'name': station.name,
-      if (station.mountHeightMm != null) 'mount_height_mm': station.mountHeightMm,
+      if (station.calibActualMm != null) 'calib_actual_mm': station.calibActualMm,
+      if (station.calibRawLevelMm != null)
+        'calib_raw_level_mm': station.calibRawLevelMm,
+      if (station.calibDistanceMm != null)
+        'calib_distance_mm': station.calibDistanceMm,
       'last_updated': uploadedAt,
     };
     await _database!.ref().update(updates);

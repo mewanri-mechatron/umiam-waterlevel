@@ -102,8 +102,9 @@ object NetworkBinder {
     }
 
     fun isOnGateway(context: Context): Boolean {
-        // Most reliable on OEMs: WifiManager still has SoftAP IP/SSID even when
-        // ConnectivityManager hides ephemeral networks from the app.
+        // Strict: only WaterLevel SoftAP (SSID and/or 192.168.4.x).
+        // Do NOT treat generic unvalidated / local-only WiFi as the sensor —
+        // that made the home screen show "Connected" on normal WiFi.
         if (wifiManagerLooksLikeSoftAp(context)) return true
 
         val ssid = currentSsid(context)
@@ -115,19 +116,6 @@ object NetworkBinder {
             val caps = cm.getNetworkCapabilities(network) ?: continue
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
             if (isSoftApNetwork(context, network, caps)) return true
-            // Specifier SoftAP: WiFi without INTERNET capability.
-            if (isLocalOnlyWifi(caps)) return true
-        }
-        // Active WiFi that is not validated often means SoftAP (status-bar WiFi + !).
-        val active = cm.activeNetwork
-        if (active != null) {
-            val caps = cm.getNetworkCapabilities(active)
-            if (caps != null &&
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-            ) {
-                return true
-            }
         }
         return false
     }

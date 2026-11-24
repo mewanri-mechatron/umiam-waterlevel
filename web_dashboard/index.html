@@ -3,89 +3,262 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Umiam Dam · WaterLevel</title>
-  <link rel="stylesheet" href="css/styles.css?v=45" />
+  <title>Umiam Dam · Water Level</title>
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="apple-touch-icon" href="favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@400,0..1&display=block" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css?v=54" />
   <script src="https://cdn.jsdelivr.net/npm/apexcharts@4.5.0/dist/apexcharts.min.js"></script>
 </head>
 <body>
   <div id="demoBanner" class="demo-strip hidden">Demo sample data — not live dam readings</div>
 
-  <div class="stage">
-    <header class="top">
-      <section class="level-card" aria-label="Current water level">
-        <p class="level-label">Current water level</p>
-        <div class="level-row">
-          <p id="cardLevel" class="level">—</p>
-          <span class="unit">m</span>
-        </div>
-        <p id="cardLevelRaw" class="raw-line">Raw level —</p>
-        <p id="cardMeasured" class="when">—</p>
-      </section>
-
-      <section class="station-card" aria-label="Station status">
-        <div class="station-head">
-          <p class="brand">WaterLevel</p>
-          <h1>Umiam Dam</h1>
-          <p class="tagline">Meghalaya reservoir</p>
-        </div>
-        <div class="hero-stats">
-          <div><span>Distance</span><strong id="cardDistance">—</strong></div>
-          <div><span>Raw dist</span><strong id="cardDistanceRaw">—</strong></div>
-          <div><span>Raw level</span><strong id="cardLevelRawStat">—</strong></div>
-          <div><span>Sensor</span><strong id="cardSensor">—</strong></div>
-          <div><span>Condition</span><strong id="dataStatusShort">—</strong></div>
-          <div><span>Last updated</span><strong id="cardFreshness">—</strong></div>
-          <div><span>Status</span><strong id="firebaseStatus">…</strong></div>
-        </div>
-      </section>
-    </header>
-
-    <section class="lower">
-      <div class="chart-panel">
-        <div class="panel-top">
-          <h2>Level trend</h2>
-          <div class="range" role="group" aria-label="Range">
-            <button data-range="24h" class="range-btn active">24h</button>
-            <button data-range="7d" class="range-btn">7d</button>
-            <button data-range="30d" class="range-btn">30d</button>
-            <button id="exportCsv" class="export">CSV</button>
+  <div class="page">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">
+            <span class="material-symbols-outlined">water_drop</span>
+          </div>
+          <div>
+            <div class="brand-title-row">
+              <h1>Umiam Dam</h1>
+              <span id="badgeLive" class="badge badge-success">
+                <span class="dot"></span> Live
+              </span>
+              <span id="badgeCondition" class="badge badge-muted">Normal</span>
+            </div>
+            <p class="brand-sub">Meghalaya Reservoir · Stage - 1</p>
           </div>
         </div>
-        <div class="chart-host">
-          <div id="levelChart"></div>
-        </div>
-      </div>
 
-      <div class="list-panel">
-        <div class="panel-top">
-          <h2>Recent readings</h2>
-          <span id="pageInfo" class="count"></span>
-        </div>
-        <div class="table-wrap">
-          <table id="readingsTable">
-            <thead>
-              <tr>
-                <th data-sort="measurement_time">Time</th>
-                <th data-sort="water_level_mm">Level</th>
-                <th data-sort="distance_mm">Raw dist</th>
-                <th data-sort="water_level_mm">Raw level</th>
-                <th data-sort="status">Status</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div class="pager">
-          <button id="prevPage">Prev</button>
-          <button id="nextPage">Next</button>
+        <div class="topbar-actions">
+          <div class="seg" role="tablist" aria-label="Display units">
+            <button type="button" class="seg-btn unit-btn" data-unit="ft">ft</button>
+            <button type="button" class="seg-btn unit-btn" data-unit="m">m</button>
+            <button type="button" class="seg-btn unit-btn" data-unit="cm">cm</button>
+            <button type="button" class="seg-btn unit-btn" data-unit="mm">mm</button>
+          </div>
+          <button type="button" id="exportCsv" class="btn-outline">
+            <span class="material-symbols-outlined">download</span>
+            Export CSV
+          </button>
         </div>
       </div>
-    </section>
+    </header>
+
+    <main class="main">
+      <section class="telemetry-row" aria-label="Current reservoir telemetry">
+        <article class="hero-card">
+          <div class="hero-top">
+            <span class="eyebrow">Current water level</span>
+            <div id="heroClock" class="hero-clock" aria-label="Measurement time">
+              <span id="heroClockDate">—</span>
+              <span id="heroClockTime">—</span>
+            </div>
+          </div>
+          <div class="hero-level">
+            <span id="cardLevel" class="hero-value">—</span>
+            <span id="cardUnit" class="hero-unit">ft</span>
+          </div>
+          <p class="hero-note">
+            Above mean sea level ·
+            <span id="heroDelta" class="delta">—</span>
+            in last 24h
+          </p>
+          <div class="hero-foot">
+            <div>
+              <span class="hero-foot-label">Trend</span>
+              <strong id="heroTrend" class="mono">—</strong>
+            </div>
+            <div>
+              <span class="hero-foot-label">Range high</span>
+              <strong id="heroHigh" class="mono">—</strong>
+            </div>
+            <div>
+              <span class="hero-foot-label">Range low</span>
+              <strong id="heroLow" class="mono">—</strong>
+            </div>
+            <div>
+              <span class="hero-foot-label">Next reading</span>
+              <strong id="heroNext" class="mono">—</strong>
+            </div>
+          </div>
+        </article>
+
+        <article class="diag-card">
+          <header class="card-head">
+            <div>
+              <h2>Station diagnostics</h2>
+              <p>Sensor health, calibration, and sync</p>
+            </div>
+            <span id="intervalLabel" class="mono muted">—</span>
+          </header>
+          <div class="metric-grid">
+            <div class="metric">
+              <span class="metric-label">Raw level</span>
+              <strong id="cardDistance" class="mono">—</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Calibration</span>
+              <strong id="cardCalib" class="mono">—</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Last updated</span>
+              <strong id="cardFreshness" class="mono">—</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Sensor</span>
+              <strong id="cardSensor"><span class="status-dot"></span> —</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Condition</span>
+              <strong id="dataStatusShort">—</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Stream</span>
+              <strong id="firebaseStatus"><span class="status-dot"></span> …</strong>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="weather-card" aria-label="Local weather near Umiam Dam">
+        <header class="card-head weather-head">
+          <div>
+            <h2>Weather near dam</h2>
+            <p>Open-Meteo · Umiam / Barapani area</p>
+          </div>
+          <span id="weatherUpdated" class="mono muted small">—</span>
+        </header>
+        <div class="weather-grid">
+          <div class="weather-now">
+            <span class="material-symbols-outlined weather-icon" id="weatherIcon" aria-hidden="true">partly_cloudy_day</span>
+            <div>
+              <strong id="weatherTemp" class="weather-temp mono">—</strong>
+              <p id="weatherDesc" class="weather-desc">Loading…</p>
+            </div>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Humidity</span>
+            <strong id="weatherHumidity" class="mono">—</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Wind</span>
+            <strong id="weatherWind" class="mono">—</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Rain last 24h</span>
+            <strong id="weatherRain24" class="mono">—</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Rain next 24h</span>
+            <strong id="weatherRainNext" class="mono">—</strong>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Rain last 7d</span>
+            <strong id="weatherRain7" class="mono">—</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="data-row" aria-label="Trend and recent readings">
+        <article class="chart-card">
+          <header class="card-head">
+            <div>
+              <h2>Level trend</h2>
+              <p id="chartSubtitle">Reservoir elevation profile</p>
+            </div>
+            <div class="seg" role="tablist" aria-label="Chart timeframe">
+              <button type="button" class="seg-btn range-btn" data-range="24h">24h</button>
+              <button type="button" class="seg-btn range-btn" data-range="7d">7d</button>
+              <button type="button" class="seg-btn range-btn active" data-range="30d">30d</button>
+            </div>
+          </header>
+          <div class="chart-host">
+            <div id="levelChart"></div>
+          </div>
+          <footer class="chart-foot">
+            <div>
+              <span class="metric-label">Range high</span>
+              <strong id="chartHigh" class="mono">—</strong>
+            </div>
+            <div>
+              <span class="metric-label">Range low</span>
+              <strong id="chartLow" class="mono">—</strong>
+            </div>
+            <div>
+              <span class="metric-label">24h change</span>
+              <strong id="chartDelta" class="mono">—</strong>
+            </div>
+          </footer>
+        </article>
+
+        <article class="table-card">
+          <header class="table-head">
+            <div class="table-title">
+              <h2>Recent readings</h2>
+              <span id="pageInfo" class="count-badge">0</span>
+            </div>
+            <span id="tableDay" class="muted small">—</span>
+          </header>
+          <div class="table-wrap">
+            <table id="readingsTable">
+              <thead>
+                <tr>
+                  <th data-sort="measurement_time">Date</th>
+                  <th data-sort="measurement_time">Time</th>
+                  <th data-sort="display_level_ft" class="num">Level</th>
+                  <th data-sort="distance_mm" class="num">Raw</th>
+                  <th data-sort="status" class="num">Status</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <footer class="table-foot">
+            <span id="paginationInfo" class="muted small">—</span>
+            <div class="pager">
+              <button type="button" id="prevPage">Previous</button>
+              <button type="button" id="nextPage">Next</button>
+            </div>
+          </footer>
+        </article>
+      </section>
+
+      <section class="extra-charts" aria-label="Rainfall and raw level">
+        <article class="chart-card">
+          <header class="card-head">
+            <div>
+              <h2>Rainfall near dam</h2>
+              <p>Daily precipitation · last 7 days + forecast</p>
+            </div>
+          </header>
+          <div class="chart-host chart-host-sm">
+            <div id="rainChart"></div>
+          </div>
+        </article>
+        <article class="chart-card">
+          <header class="card-head">
+            <div>
+              <h2>Raw level trend</h2>
+              <p id="rawChartSubtitle">Sensor gap over selected range</p>
+            </div>
+          </header>
+          <div class="chart-host chart-host-sm">
+            <div id="rawChart"></div>
+          </div>
+        </article>
+      </section>
+    </main>
   </div>
 
-  <script src="js/firebase-config.js?v=45"></script>
-  <script src="js/demo-data.js?v=45"></script>
-  <script type="module" src="js/firebase.js?v=45"></script>
-  <script type="module" src="js/app.js?v=45"></script>
+  <script src="js/firebase-config.js?v=52"></script>
+  <script src="js/demo-data.js?v=52"></script>
+  <script type="module" src="js/firebase.js?v=52"></script>
+  <script type="module" src="js/app.js?v=54"></script>
 </body>
 </html>

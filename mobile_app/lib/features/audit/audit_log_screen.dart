@@ -31,7 +31,7 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFF3F7F5),
       appBar: AppBar(
-        title: const Text('Audit log'),
+        title: const Text('Activity log'),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -43,7 +43,7 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
             onPressed: () async {
               final text = audit.entries
                   .map((e) {
-                    final ts = DateFormat('yyyy-MM-dd HH:mm:ss').format(e.createdAt);
+                    final ts = DateFormat('yyyy-MM-dd h:mm:ss a').format(e.createdAt);
                     final detail = e.detail == null || e.detail!.isEmpty
                         ? ''
                         : '\n  ${e.detail}';
@@ -66,7 +66,9 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: const Text('Clear audit log?'),
-                  content: const Text('This only clears debug history on this phone.'),
+                  content: const Text(
+                    'Clears the log on this phone only. Cloud audit copies (if any) stay in Firebase.',
+                  ),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.pop(ctx, false),
@@ -92,7 +94,7 @@ class _AuditLogScreenState extends ConsumerState<AuditLogScreen> {
           if (entries.isEmpty) {
             return Center(
               child: Text(
-                'No events yet.\nRun Sync now to start logging.',
+                'No events yet.\nRun Sync now — logs save to the phone DB and to Firebase when online.',
                 textAlign: TextAlign.center,
                 style: GoogleFonts.manrope(color: AppColors.muted, height: 1.4),
               ),
@@ -145,7 +147,7 @@ class _AuditTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ts = DateFormat('dd MMM HH:mm:ss').format(entry.createdAt);
+    final ts = DateFormat('dd MMM yyyy h:mm:ss a').format(entry.createdAt);
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(

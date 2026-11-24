@@ -74,6 +74,31 @@ class NetworkService {
     }
   }
 
+  /// Best-effort SoftAP release so mobile data can reach Firebase.
+  Future<bool> pauseWifiForCloudUpload() async {
+    try {
+      final ok =
+          await _wifiChannel.invokeMethod<bool>('pauseWifiForCloudUpload');
+      return ok ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  Future<bool> resumeWifiAfterCloudUpload() async {
+    try {
+      final ok =
+          await _wifiChannel.invokeMethod<bool>('resumeWifiAfterCloudUpload');
+      return ok ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
   Future<Map<String, dynamic>> wifiDiagnostics() async {
     try {
       final raw = await _wifiChannel.invokeMethod<dynamic>('getWifiDiagnostics');
@@ -88,13 +113,16 @@ class NetworkService {
     return {};
   }
 
-  /// SoftAP check used by the home UI. Prefer native flags; fall back to HTTP.
+  /// SoftAP check for the home UI. Strict: WaterLevel SSID / 192.168.4.x only.
   Future<bool> isOnGatewayFast({bool allowHttpProbe = true}) async {
     try {
       final ok = await _wifiChannel
           .invokeMethod<bool>('isOnGateway')
           .timeout(const Duration(milliseconds: 800));
       if (ok == true) return true;
+      if (ok == false) {
+        // Native said no — only allow a positive override via SSID/subnet.
+      }
     } on MissingPluginException {
       // Fall through.
     } on PlatformException {
@@ -110,16 +138,16 @@ class NetworkService {
           ssid.toLowerCase() == AppConstants.gatewaySsid.toLowerCase()) {
         return true;
       }
-      if (diag['onGateway'] == true) return true;
-      if (diag['onGatewaySubnet'] == true) return true;
       if (diag['gatewaySsidMatch'] == true) return true;
-      if (diag['localOnlyWifi'] == true) return true;
+      if (diag['onGatewaySubnet'] == true) return true;
+      // Do not use localOnlyWifi alone — many phones mark captive WiFi that way.
     } catch (_) {}
 
+    // HTTP to 192.168.4.1 only as last resort (can false-positive on some LANs).
     if (!allowHttpProbe) return false;
     try {
       return await gatewayHttpReachable()
-          .timeout(const Duration(seconds: 2), onTimeout: () => false);
+          .timeout(const Duration(milliseconds: 900), onTimeout: () => false);
     } catch (_) {
       return false;
     }

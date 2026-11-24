@@ -99,7 +99,35 @@ class WifiPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.
             "hasValidatedInternet" -> result.success(NetworkBinder.hasValidatedInternet(context))
             "isWifiEnabled" -> result.success(isWifiEnabled(context))
             "ensureWifiEnabled" -> result.success(ensureWifiEnabled(context))
+            "pauseWifiForCloudUpload" -> result.success(pauseWifiForCloudUpload(context))
+            "resumeWifiAfterCloudUpload" -> result.success(resumeWifiAfterCloudUpload(context))
             else -> result.notImplemented()
+        }
+    }
+
+    /** Briefly drop SoftAP so LTE can upload; caller should resume afterward. */
+    private fun pauseWifiForCloudUpload(context: Context): Boolean {
+        return try {
+            NetworkBinder.clearBinding(context)
+            val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            if (!wifi.isWifiEnabled) return true
+            @Suppress("DEPRECATION")
+            wifi.setWifiEnabled(false)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun resumeWifiAfterCloudUpload(context: Context): Boolean {
+        return try {
+            val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            if (wifi.isWifiEnabled) return true
+            @Suppress("DEPRECATION")
+            wifi.setWifiEnabled(true)
+        } catch (_: Throwable) {
+            false
         }
     }
 

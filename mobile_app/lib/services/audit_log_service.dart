@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
+import '../core/constants/app_constants.dart';
 import '../database/app_database.dart';
+import 'firebase_service.dart';
+import 'network_service.dart';
 
 class AuditEntry {
   const AuditEntry({
@@ -31,13 +36,26 @@ class AuditEntry {
       );
 }
 
-/// Persisted debug trail for field troubleshooting.
+/// Persisted debug trail: local SQLite always, Firebase when online.
 class AuditLogService extends ChangeNotifier {
-  AuditLogService(this._db);
+  AuditLogService(
+    this._db, {
+    FirebaseService? firebase,
+    NetworkService? network,
+    this.stationId = AppConstants.defaultStationId,
+  }) {
+    _firebase = firebase;
+    _network = network;
+  }
 
   final AppDatabase _db;
+  final String stationId;
+  FirebaseService? _firebase;
+  NetworkService? _network;
   final List<AuditEntry> _cache = [];
   bool _loaded = false;
+
+  static const _uiLimit = 2000;
 
   List<AuditEntry> get entries => List.unmodifiable(_cache);
 
@@ -47,7 +65,7 @@ class AuditLogService extends ChangeNotifier {
   }
 
   Future<void> refresh() async {
-    final rows = await _db.getAuditLogs(limit: 200);
+    final rows = await _db.getAuditLogs(limit: _uiLimit);
     _cache
       ..clear()
       ..addAll(rows.map(AuditEntry.fromMap));
@@ -61,6 +79,7 @@ class AuditLogService extends ChangeNotifier {
     String category = 'sync',
     String? detail,
   }) async {
+    final createdAtMs = DateTime.now().millisecondsSinceEpoch;
     try {
       await _db.insertAuditLog(
         level: level,
@@ -71,20 +90,57 @@ class AuditLogService extends ChangeNotifier {
       _cache.insert(
         0,
         AuditEntry(
-          createdAt: DateTime.now(),
+          createdAt: DateTime.fromMillisecondsSinceEpoch(createdAtMs),
           level: level,
           category: category,
           message: message,
           detail: detail,
         ),
       );
-      if (_cache.length > 200) {
-        _cache.removeRange(200, _cache.length);
+      if (_cache.length > _uiLimit) {
+        _cache.removeRange(_uiLimit, _cache.length);
       }
       notifyListeners();
     } catch (e) {
       // Logging must never break sync.
       debugPrint('audit log failed: $e');
+    }
+
+    // Best-effort cloud mirror — never block the caller.
+    unawaited(_mirrorToFirebase(
+      level: level,
+      category: category,
+      message: message,
+      detail: detail,
+      createdAtMs: createdAtMs,
+    ));
+  }
+
+  Future<void> _mirrorToFirebase({
+    required String level,
+    required String category,
+    required String message,
+    String? detail,
+    required int createdAtMs,
+  }) async {
+    final firebase = _firebase;
+    final network = _network;
+    if (firebase == null || network == null) return;
+    try {
+      final online = await network.peekHasInternet();
+      if (!online) return;
+      final ready = await firebase.initialize();
+      if (!ready) return;
+      await firebase.uploadAuditLog(
+        stationId: stationId,
+        level: level,
+        category: category,
+        message: message,
+        detail: detail,
+        createdAtMs: createdAtMs,
+      );
+    } catch (e) {
+      debugPrint('audit cloud mirror skipped: $e');
     }
   }
 

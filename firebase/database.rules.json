@@ -21,6 +21,14 @@
           ".write": "auth != null",
           ".validate": "newData.hasChildren(['boot_id', 'seq', 'measurement_time', 'status'])"
         }
+      },
+      "audit": {
+        "$stationId": {
+          "$logId": {
+            ".write": "auth != null",
+            ".validate": "newData.hasChildren(['created_at', 'level', 'category', 'message']) && newData.child('created_at').isNumber() && newData.child('level').isString() && newData.child('category').isString() && newData.child('message').isString()"
+          }
+        }
       }
     },
     "$other": {

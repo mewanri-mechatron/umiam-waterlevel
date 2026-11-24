@@ -41,7 +41,7 @@ class AppDatabase {
     final path = p.join(dbPath, 'water_level.db');
     return openDatabase(
       path,
-      version: 2,
+      version: 3,
       singleInstance: true,
       onCreate: (db, version) async {
         await db.execute('''
@@ -51,6 +51,9 @@ CREATE TABLE stations (
   gateway_ip TEXT NOT NULL,
   wifi_ssid TEXT NOT NULL,
   mount_height_mm INTEGER,
+  calib_actual_mm INTEGER,
+  calib_raw_level_mm INTEGER,
+  calib_distance_mm INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 )
@@ -101,7 +104,6 @@ CREATE TABLE sync_state (
           'name': AppConstants.defaultStationName,
           'gateway_ip': AppConstants.gatewayIp,
           'wifi_ssid': AppConstants.gatewaySsid,
-          'mount_height_mm': 5000,
           'created_at': now,
           'updated_at': now,
         });
@@ -115,6 +117,17 @@ CREATE TABLE sync_state (
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
           await _createAuditLogTable(db);
+        }
+        if (oldVersion < 3) {
+          await db.execute(
+            'ALTER TABLE stations ADD COLUMN calib_actual_mm INTEGER',
+          );
+          await db.execute(
+            'ALTER TABLE stations ADD COLUMN calib_raw_level_mm INTEGER',
+          );
+          await db.execute(
+            'ALTER TABLE stations ADD COLUMN calib_distance_mm INTEGER',
+          );
         }
       },
     );
@@ -150,14 +163,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
       'message': message,
       'detail': detail,
     });
-    // Keep last 500 rows.
+    // Keep a long local trail for field debugging.
     await db.rawDelete(
       'DELETE FROM audit_log WHERE id NOT IN '
-      '(SELECT id FROM audit_log ORDER BY id DESC LIMIT 500)',
+      '(SELECT id FROM audit_log ORDER BY id DESC LIMIT 5000)',
     );
   }
 
-  Future<List<Map<String, Object?>>> getAuditLogs({int limit = 200}) async {
+  Future<List<Map<String, Object?>>> getAuditLogs({int limit = 2000}) async {
     final db = await database;
     return db.query(
       'audit_log',
@@ -308,6 +321,28 @@ CREATE TABLE IF NOT EXISTS audit_log (
       [stationId],
     );
     return Sqflite.firstIntValue(result) ?? 0;
+  }
+
+  Future<int> countReadings(String stationId) async {
+    final db = await database;
+    final result = await db.rawQuery(
+      'SELECT COUNT(*) AS c FROM readings WHERE station_id = ?',
+      [stationId],
+    );
+    return Sqflite.firstIntValue(result) ?? 0;
+  }
+
+  /// Remove readings older than [beforeEpoch] (exclusive).
+  Future<int> deleteReadingsBefore({
+    required String stationId,
+    required int beforeEpoch,
+  }) async {
+    final db = await database;
+    return db.delete(
+      'readings',
+      where: 'station_id = ? AND measurement_time < ?',
+      whereArgs: [stationId, beforeEpoch],
+    );
   }
 
   /// Only for tests. Do not close the shared instance from WorkManager.

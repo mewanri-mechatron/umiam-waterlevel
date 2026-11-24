@@ -2,15 +2,19 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 
 import '../../app/providers.dart';
 import '../../app/theme.dart';
 import '../../core/constants/app_constants.dart';
+import '../../core/utils/display_units.dart';
 import '../../core/utils/water_level_math.dart';
+import '../../models/reading.dart';
+import '../../models/station.dart';
 import '../../services/auto_sync_controller.dart';
+import '../../widgets/level_chart.dart';
+import '../../widgets/unit_picker.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -26,6 +30,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   bool _wasBusy = false;
   bool _wasOnGateway = false;
   bool _actionBusy = false;
+  _ChartRange _chartRange = _ChartRange.h24;
 
   @override
   void initState() {
@@ -46,8 +51,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         final snap = _auto!.snapshot;
         final busy = snap.busy;
         final connectedNow = snap.onGateway;
-        if ((_wasBusy && !busy) || (!_wasOnGateway && connectedNow)) {
+        if ((_wasBusy && !busy) ||
+            (!_wasOnGateway && connectedNow) ||
+            (_wasOnGateway && !connectedNow)) {
           ref.invalidate(dashboardDataProvider);
+          ref.invalidate(historyReadingsProvider);
+          ref.invalidate(stationProvider);
         }
         _wasBusy = busy;
         _wasOnGateway = connectedNow;
@@ -62,6 +71,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _auto?.refreshConnectionStatus();
+      unawaited(_auto?.runCycle());
       ref.invalidate(dashboardDataProvider);
     }
   }
@@ -83,48 +93,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     if (mounted) setState(() => _actionBusy = false);
   }
 
-  Future<void> _connectWaterLevel() async {
+  Future<void> _connectSensor() async {
     final network = ref.read(networkServiceProvider);
     final auto = ref.read(autoSyncControllerProvider);
     _auto ??= auto;
 
     setState(() => _actionBusy = true);
     try {
-      // Already on SoftAP (user joined from system WiFi) — don't sit on Connecting…
-      if (await network.isOnGatewayFast()) {
+      if (await network.isOnGatewayFast(allowHttpProbe: false)) {
         await auto.refreshConnectionStatus();
         await auto.runCycle(force: true);
-        ref.invalidate(dashboardDataProvider);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Connected to WaterLevel')),
-          );
-        }
+        _refreshData();
         return;
       }
 
       final msg = await network.requestGatewayWifiConnection();
       await ref.read(auditLogServiceProvider).info(
-            'Connect to WaterLevel requested',
+            'Connect to sensor WiFi',
             category: 'network',
             detail: msg,
           );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Approve the phone prompt for “${AppConstants.gatewaySsid}”…',
-            ),
-          ),
-        );
-      }
 
-      // Short poll only — status timer + SoftAP events keep updating the UI.
       var connected = false;
       for (var i = 0; i < 12; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 800));
         if (!mounted) return;
-        final onGateway = await network.isOnGatewayFast();
+        final onGateway =
+            await network.isOnGatewayFast(allowHttpProbe: false);
         await auto.refreshConnectionStatus();
         if (onGateway || auto.snapshot.onGateway) {
           connected = true;
@@ -135,16 +130,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
       if (connected) {
         await auto.runCycle(force: true);
-        ref.invalidate(dashboardDataProvider);
-      }
-
-      if (mounted) {
+        _refreshData();
+      } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              connected
-                  ? 'Connected to WaterLevel'
-                  : 'If the phone shows WaterLevel WiFi, tap Sync now',
+              'Join “${AppConstants.gatewaySsid}” WiFi, then tap Sync',
             ),
           ),
         );
@@ -154,296 +145,326 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     }
   }
 
+  void _refreshData() {
+    ref.invalidate(dashboardDataProvider);
+    ref.invalidate(historyReadingsProvider);
+    ref.invalidate(stationProvider);
+  }
+
   Future<void> _syncNow() async {
     final auto = ref.read(autoSyncControllerProvider);
     final network = ref.read(networkServiceProvider);
     _auto ??= auto;
-    if (!auto.snapshot.wifiOn) {
+    if (!auto.snapshot.wifiOn && !auto.snapshot.hasInternet) {
       await _turnWifiOn();
       return;
     }
-    // Re-probe SoftAP so Sync works even when the banner lagged behind.
-    await network.isOnGatewayFast();
+    await network.isOnGatewayFast(allowHttpProbe: false);
     await auto.refreshConnectionStatus();
     await auto.runCycle(force: true);
-    ref.invalidate(dashboardDataProvider);
+    _refreshData();
   }
 
   @override
   Widget build(BuildContext context) {
     final dash = ref.watch(dashboardDataProvider);
     final auto = ref.watch(autoSyncControllerProvider);
-    // Keep listener attached if provider instance ever changes.
     if (!identical(_auto, auto)) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _attachAutoSync());
     }
     final snap = auto.snapshot;
+    final unit = ref.watch(displayLengthUnitProvider);
+
+    // Never blank-screen: show chrome while first load finishes.
+    final data = dash.asData?.value;
+    final station = data?.station;
+    final latest = data?.latest;
+    final recent = data?.recent ?? const <Reading>[];
+    final pending =
+        snap.pendingCount > 0 ? snap.pendingCount : (data?.pendingCount ?? 0);
+    final busy = snap.busy || _actionBusy;
+
+    final levelMm = latest == null || station == null
+        ? null
+        : resolveDisplayLevelMm(
+            referenceActualMm: station.calibActualMm,
+            referenceDistanceMm: station.calibDistanceMm,
+            currentDistanceMm: latest.distanceMm,
+          );
+    final levelLabel = levelMm == null
+        ? null
+        : unit.formatElevation(levelMm, withUnit: false);
+
+    final chartRows = _filterChart(recent, _chartRange);
+    final delta24 = _delta24h(recent, station, unit);
+    final rangeStats = _rangeStats(chartRows, station, unit);
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF3F7F5),
+      backgroundColor: AppColors.mist,
       body: SafeArea(
-        child: dash.when(
-          skipLoadingOnReload: true,
-          skipLoadingOnRefresh: true,
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text('$e', textAlign: TextAlign.center),
-            ),
-          ),
-          data: (data) {
-            final latest = data.latest;
-            final level = latest?.waterLevelMm ??
-                calculateWaterLevelMm(
-                  mountHeightMm: data.station.mountHeightMm,
-                  distanceMm: latest?.distanceMm,
-                );
-            final measured = latest?.measurementTime;
-            final levelLabel =
-                level == null ? '—' : (level / 1000).toStringAsFixed(2);
-            final pending =
-                snap.pendingCount > 0 ? snap.pendingCount : data.pendingCount;
-
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: RefreshIndicator(
+          color: AppColors.deepTeal,
+          onRefresh: () async {
+            await _syncNow();
+          },
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+            children: [
+              _BrandHeader(snap: snap),
+              const SizedBox(height: 12),
+              Row(
                 children: [
-                  Row(
-                    children: [
-                      Text(
-                        'WaterLevel',
-                        style: GoogleFonts.manrope(
-                          fontSize: 28,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -0.8,
-                          color: AppColors.ink,
-                        ),
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        tooltip: 'Audit log',
-                        onPressed: () => context.push('/audit'),
-                        icon: const Icon(Icons.receipt_long_outlined),
-                        color: AppColors.muted,
-                      ),
-                      IconButton(
-                        tooltip: 'Settings',
-                        onPressed: () => context.push('/advanced'),
-                        icon: const Icon(Icons.settings_outlined),
-                        color: AppColors.muted,
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  _ConnectionBanner(
-                    wifiOn: snap.wifiOn,
-                    connected: snap.onGateway || data.usingMockGateway,
-                    hasInternet: snap.hasInternet,
-                  ),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(28),
-                        gradient: const LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            Color(0xFF0B3D34),
-                            Color(0xFF0A5C4B),
-                            Color(0xFF149276),
-                          ],
-                        ),
-                      ),
-                      padding: const EdgeInsets.fromLTRB(24, 28, 24, 24),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Current water level',
-                            style: GoogleFonts.manrope(
-                              color: Colors.white70,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 15,
-                            ),
-                          ),
-                          const Spacer(),
-                          if (latest == null)
-                            Text(
-                              'No reading yet',
-                              style: GoogleFonts.manrope(
-                                color: Colors.white,
-                                fontSize: 36,
-                                fontWeight: FontWeight.w800,
-                                height: 1.05,
-                              ),
-                            )
-                          else ...[
-                            Text(
-                              levelLabel,
-                              style: GoogleFonts.manrope(
-                                color: Colors.white,
-                                fontSize: 72,
-                                fontWeight: FontWeight.w800,
-                                height: 0.95,
-                                letterSpacing: -2,
-                              ),
-                            ),
-                            Text(
-                              'metres',
-                              style: GoogleFonts.manrope(
-                                color: Colors.white70,
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                          const Spacer(),
-                          Text(
-                            measured == null
-                                ? 'Connect to WaterLevel WiFi near the station to collect readings.'
-                                : 'Updated ${DateFormat('dd MMM, HH:mm').format(DateTime.fromMillisecondsSinceEpoch(measured * 1000))}',
-                            style: GoogleFonts.manrope(
-                              color: Colors.white70,
-                              fontSize: 14,
-                              height: 1.35,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  _StatusBar(
-                    busy: snap.busy,
-                    isError: snap.phase == AutoSyncPhase.error,
-                    title: snap.stepLabel ??
-                        (snap.onGateway
-                            ? 'Connected'
-                            : snap.wifiOn
-                                ? 'Ready'
-                                : 'WiFi off'),
-                    message: snap.message,
-                    pending: pending,
-                    detail: snap.lastError,
-                    onOpenAudit: () => context.push('/audit'),
-                  ),
-                  const SizedBox(height: 12),
-                  if (!snap.wifiOn)
-                    FilledButton.icon(
-                      onPressed: _actionBusy ? null : _turnWifiOn,
-                      icon: _actionBusy
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.wifi_rounded),
-                      label: Text(
-                        _actionBusy ? 'Opening WiFi…' : 'Turn on WiFi',
-                      ),
-                    )
-                  else if (!snap.onGateway && !data.usingMockGateway)
-                    FilledButton.icon(
-                      onPressed: (_actionBusy || snap.busy)
-                          ? null
-                          : _connectWaterLevel,
-                      icon: const Icon(Icons.wifi_tethering_rounded),
-                      label: Text(
-                        _actionBusy
-                            ? 'Connecting…'
-                            : 'Connect to WaterLevel WiFi',
-                      ),
-                    )
-                  else
-                    FilledButton.icon(
-                      onPressed: null,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: AppColors.okBg,
-                        disabledBackgroundColor: AppColors.okBg,
-                        disabledForegroundColor: AppColors.deepTeal,
-                      ),
-                      icon: const Icon(Icons.check_circle_rounded),
-                      label: const Text('Connected to WaterLevel'),
-                    ),
-                  const SizedBox(height: 8),
-                  OutlinedButton(
-                    onPressed: snap.busy || _actionBusy ? null : _syncNow,
-                    child: Text(snap.busy ? 'Working…' : 'Sync now'),
-                  ),
+                  const Expanded(child: UnitPicker(dense: true)),
                 ],
               ),
-            );
-          },
+              const SizedBox(height: 14),
+              _HeroCard(
+                levelLabel: levelLabel,
+                unit: unit,
+                measured: latest?.measurementTime,
+                delta24: delta24,
+                trend: rangeStats.trend,
+                high: rangeStats.high,
+                low: rangeStats.low,
+                nextLabel: _nextReadingLabel(latest),
+                loading: dash.isLoading && data == null,
+              ),
+              const SizedBox(height: 12),
+              _DiagnosticsCard(
+                station: station,
+                latest: latest,
+                unit: unit,
+                pending: pending,
+                snap: snap,
+              ),
+              const SizedBox(height: 12),
+              _StatusCard(
+                snap: snap,
+                pending: pending,
+                busy: busy,
+              ),
+              const SizedBox(height: 12),
+              _PrimaryAction(
+                snap: snap,
+                busy: busy,
+                actionBusy: _actionBusy,
+                pending: pending,
+                onWifi: _turnWifiOn,
+                onConnect: _connectSensor,
+                onSync: _syncNow,
+              ),
+              const SizedBox(height: 18),
+              _ChartHeader(
+                range: _chartRange,
+                onChanged: (r) => setState(() => _chartRange = r),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.outline),
+                ),
+                child: LevelChart(
+                  readings: chartRows,
+                  station: station,
+                  unit: unit,
+                  height: 168,
+                ),
+              ),
+              if (dash.hasError) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Could not load local data: ${dash.error}',
+                  style: GoogleFonts.poppins(
+                    color: AppColors.danger,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
   }
+
+  List<Reading> _filterChart(List<Reading> recent, _ChartRange range) {
+    if (recent.isEmpty) return recent;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final from = switch (range) {
+      _ChartRange.h24 => now - 24 * 3600,
+      _ChartRange.d7 => now - 7 * 24 * 3600,
+    };
+    final filtered =
+        recent.where((r) => r.measurementTime >= from).toList();
+    return filtered.isEmpty ? recent : filtered;
+  }
+
+  String? _delta24h(
+    List<Reading> recent,
+    Station? station,
+    DisplayLengthUnit unit,
+  ) {
+    if (station == null || recent.isEmpty) return null;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final cutoff = now - 24 * 3600;
+    int? resolve(Reading r) => resolveDisplayLevelMm(
+          referenceActualMm: station.calibActualMm,
+          referenceDistanceMm: station.calibDistanceMm,
+          currentDistanceMm: r.distanceMm,
+        );
+    final newest = resolve(recent.last);
+    Reading? old;
+    for (final r in recent) {
+      if (r.measurementTime <= cutoff) old = r;
+    }
+    old ??= recent.first;
+    final oldest = resolve(old);
+    if (newest == null || oldest == null) return null;
+    final d = unit.fromElevationStored(newest) -
+        unit.fromElevationStored(oldest);
+    final sign = d >= 0 ? '+' : '';
+    return '$sign${d.toStringAsFixed(unit.fractionDigits)} ${unit.label}';
+  }
+
+  ({String trend, String high, String low}) _rangeStats(
+    List<Reading> rows,
+    Station? station,
+    DisplayLengthUnit unit,
+  ) {
+    final vals = <double>[];
+    for (final r in rows) {
+      final stored = resolveDisplayLevelMm(
+        referenceActualMm: station?.calibActualMm,
+        referenceDistanceMm: station?.calibDistanceMm,
+        currentDistanceMm: r.distanceMm,
+      );
+      if (stored == null) continue;
+      vals.add(unit.fromElevationStored(stored));
+    }
+    if (vals.isEmpty) {
+      return (trend: '—', high: '—', low: '—');
+    }
+    final hi = vals.reduce((a, b) => a > b ? a : b);
+    final lo = vals.reduce((a, b) => a < b ? a : b);
+    final delta = vals.last - vals.first;
+    final trend = delta.abs() < 0.01
+        ? 'Steady'
+        : (delta > 0 ? 'Rising' : 'Falling');
+    return (
+      trend: trend,
+      high: '${hi.toStringAsFixed(unit.fractionDigits)} ${unit.label}',
+      low: '${lo.toStringAsFixed(unit.fractionDigits)} ${unit.label}',
+    );
+  }
+
+  String _nextReadingLabel(Reading? latest) {
+    if (latest == null) return '—';
+    final interval = latest.sendIntervalSeconds.clamp(10, 86400);
+    final next = latest.measurementTime + interval;
+    final dt = DateTime.fromMillisecondsSinceEpoch(next * 1000);
+    return DateFormat('h:mm a').format(dt);
+  }
 }
 
-class _ConnectionBanner extends StatelessWidget {
-  const _ConnectionBanner({
-    required this.wifiOn,
-    required this.connected,
-    required this.hasInternet,
-  });
+enum _ChartRange { h24, d7 }
 
-  final bool wifiOn;
-  final bool connected;
-  final bool hasInternet;
+class _BrandHeader extends StatelessWidget {
+  const _BrandHeader({required this.snap});
+  final AutoSyncSnapshot snap;
 
   @override
   Widget build(BuildContext context) {
-    final Color bg;
-    final Color fg;
-    final IconData icon;
-    final String label;
+    final live = snap.hasInternet || snap.onGateway;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: AppColors.deepTeal,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Icon(Icons.water_drop, color: Colors.white, size: 22),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  Text(
+                    'Umiam Dam',
+                    style: GoogleFonts.poppins(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.4,
+                    ),
+                  ),
+                  _Badge(
+                    label: live ? 'Live' : 'Offline',
+                    ok: live,
+                  ),
+                  if (snap.onGateway)
+                    const _Badge(label: 'At sensor', ok: true),
+                ],
+              ),
+              Text(
+                'Meghalaya Reservoir · Stage - 1',
+                style: GoogleFonts.poppins(
+                  color: AppColors.muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
 
-    if (connected) {
-      bg = AppColors.okBg;
-      fg = AppColors.deepTeal;
-      icon = Icons.check_circle_rounded;
-      label = 'Connected to WaterLevel';
-    } else if (!wifiOn) {
-      bg = AppColors.warnBg;
-      fg = AppColors.warn;
-      icon = Icons.wifi_off_rounded;
-      label = 'WiFi is off';
-    } else if (hasInternet) {
-      bg = const Color(0xFFE8EEF8);
-      fg = const Color(0xFF2F4F7A);
-      icon = Icons.cloud_outlined;
-      label = 'Online · not on WaterLevel WiFi';
-    } else {
-      bg = AppColors.warnBg;
-      fg = AppColors.warn;
-      icon = Icons.wifi_rounded;
-      label = 'WiFi on · not connected to WaterLevel';
-    }
+class _Badge extends StatelessWidget {
+  const _Badge({required this.label, required this.ok});
+  final String label;
+  final bool ok;
 
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(14),
+        color: ok ? AppColors.okBg : AppColors.warnBg,
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 18, color: fg),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              label,
-              style: GoogleFonts.manrope(
-                fontWeight: FontWeight.w800,
-                fontSize: 13,
-                color: fg,
-              ),
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: ok ? AppColors.ok : AppColors.warn,
+            ),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: GoogleFonts.poppins(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: ok ? AppColors.okInk : AppColors.warn,
             ),
           ),
         ],
@@ -452,134 +473,585 @@ class _ConnectionBanner extends StatelessWidget {
   }
 }
 
-class _StatusBar extends StatelessWidget {
-  const _StatusBar({
-    required this.busy,
-    required this.isError,
-    required this.title,
-    required this.message,
-    required this.pending,
-    required this.detail,
-    required this.onOpenAudit,
+class _HeroCard extends StatelessWidget {
+  const _HeroCard({
+    required this.levelLabel,
+    required this.unit,
+    required this.measured,
+    required this.delta24,
+    required this.trend,
+    required this.high,
+    required this.low,
+    required this.nextLabel,
+    required this.loading,
   });
 
-  final bool busy;
-  final bool isError;
-  final String title;
-  final String message;
-  final int pending;
-  final String? detail;
-  final VoidCallback onOpenAudit;
+  final String? levelLabel;
+  final DisplayLengthUnit unit;
+  final int? measured;
+  final String? delta24;
+  final String trend;
+  final String high;
+  final String low;
+  final String nextLabel;
+  final bool loading;
 
   @override
   Widget build(BuildContext context) {
-    final accent = isError
-        ? AppColors.danger
-        : busy
-            ? AppColors.deepTeal
-            : AppColors.muted;
+    final date = measured == null
+        ? '—'
+        : DateFormat('dd MMM yyyy')
+            .format(DateTime.fromMillisecondsSinceEpoch(measured! * 1000));
+    final time = measured == null
+        ? '—'
+        : DateFormat('h:mm a')
+            .format(DateTime.fromMillisecondsSinceEpoch(measured! * 1000));
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: isError
-              ? AppColors.danger.withValues(alpha: 0.35)
-              : AppColors.line,
-        ),
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.outline),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              if (busy)
-                SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2.2,
-                    color: accent,
-                  ),
-                )
-              else
-                Icon(
-                  isError
-                      ? Icons.error_outline_rounded
-                      : Icons.info_outline_rounded,
-                  size: 18,
-                  color: accent,
-                ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  style: GoogleFonts.manrope(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 15,
-                  ),
+              Text(
+                'Current water level',
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.muted,
+                  letterSpacing: 0.2,
                 ),
               ),
-              TextButton(
-                onPressed: onOpenAudit,
-                style: TextButton.styleFrom(
-                  foregroundColor: AppColors.deepTeal,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: Text(
-                  'Log',
-                  style: GoogleFonts.manrope(fontWeight: FontWeight.w700),
-                ),
+              const Spacer(),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    date,
+                    style: GoogleFonts.poppins(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                  Text(
+                    time,
+                    style: GoogleFonts.poppins(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
           const SizedBox(height: 8),
+          if (loading && levelLabel == null)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+            )
+          else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  levelLabel ?? '—',
+                  style: GoogleFonts.poppins(
+                    fontSize: 48,
+                    fontWeight: FontWeight.w600,
+                    height: 1,
+                    letterSpacing: -1.2,
+                    color: AppColors.deepTeal,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 8, bottom: 8),
+                  child: Text(
+                    unit.label,
+                    style: GoogleFonts.poppins(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          const SizedBox(height: 6),
           Text(
-            message,
-            style: GoogleFonts.manrope(
+            'Above mean sea level · ${delta24 ?? '—'} in last 24h',
+            style: GoogleFonts.poppins(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
               color: AppColors.muted,
-              height: 1.35,
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
             ),
           ),
-          if (detail != null && detail!.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            Text(
-              detail!,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.manrope(
-                color: AppColors.danger,
-                fontSize: 12,
-              ),
-            ),
-          ],
+          const SizedBox(height: 12),
+          const Divider(height: 1, color: AppColors.line),
           const SizedBox(height: 10),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: pending == 0 ? AppColors.okBg : AppColors.warnBg,
-              borderRadius: BorderRadius.circular(12),
+          Row(
+            children: [
+              _FootStat(label: 'Trend', value: trend),
+              _FootStat(label: 'Range high', value: high),
+              _FootStat(label: 'Range low', value: low),
+              _FootStat(label: 'Next', value: nextLabel),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FootStat extends StatelessWidget {
+  const _FootStat({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: GoogleFonts.poppins(
+              fontSize: 10,
+              fontWeight: FontWeight.w500,
+              color: AppColors.muted,
             ),
-            child: Text(
-              pending == 0
-                  ? 'Cloud status: everything pushed'
-                  : 'Cloud status: $pending pending upload',
-              style: GoogleFonts.manrope(
-                fontWeight: FontWeight.w800,
-                fontSize: 13,
-                color: pending == 0 ? AppColors.deepTeal : AppColors.warn,
-              ),
+          ),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: GoogleFonts.poppins(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _DiagnosticsCard extends StatelessWidget {
+  const _DiagnosticsCard({
+    required this.station,
+    required this.latest,
+    required this.unit,
+    required this.pending,
+    required this.snap,
+  });
+
+  final Station? station;
+  final Reading? latest;
+  final DisplayLengthUnit unit;
+  final int pending;
+  final AutoSyncSnapshot snap;
+
+  @override
+  Widget build(BuildContext context) {
+    final calib = station?.calibActualMm == null
+        ? 'Not set'
+        : unit.formatElevation(station!.calibActualMm);
+    final raw = formatDistanceMeters(latest?.distanceMm, unit: unit);
+    final sensor = latest == null ? '—' : sensorStatusLabel(latest!.status);
+    final freshness = latest == null
+        ? '—'
+        : formatReadingTimeShort(latest!.measurementTime);
+    final cloud = pending == 0
+        ? 'Up to date'
+        : '$pending pending';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Station diagnostics',
+            style: GoogleFonts.poppins(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          Text(
+            'Sensor health, calibration, and sync',
+            style: GoogleFonts.poppins(
+              fontSize: 12,
+              color: AppColors.muted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              _MetricTile(label: 'Raw level', value: raw),
+              _MetricTile(label: 'Calibration', value: calib),
+              _MetricTile(label: 'Last updated', value: freshness),
+              _MetricTile(label: 'Sensor', value: sensor),
+              _MetricTile(
+                label: 'Cloud',
+                value: cloud,
+                warn: pending > 0,
+              ),
+              _MetricTile(
+                label: 'Link',
+                value: snap.onGateway
+                    ? 'SoftAP'
+                    : (snap.hasInternet ? 'Internet' : 'None'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MetricTile extends StatelessWidget {
+  const _MetricTile({
+    required this.label,
+    required this.value,
+    this.warn = false,
+  });
+
+  final String label;
+  final String value;
+  final bool warn;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 148,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: AppColors.panelSoft,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: GoogleFonts.poppins(
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                color: AppColors.muted,
+              ),
+            ),
+            Text(
+              value,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.poppins(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: warn ? AppColors.warn : AppColors.ink,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusCard extends StatelessWidget {
+  const _StatusCard({
+    required this.snap,
+    required this.pending,
+    required this.busy,
+  });
+
+  final AutoSyncSnapshot snap;
+  final int pending;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final isError = snap.phase == AutoSyncPhase.error;
+    final Color bg;
+    final Color fg;
+    final IconData icon;
+    final String headline;
+
+    if (isError) {
+      bg = AppColors.dangerBg;
+      fg = AppColors.danger;
+      icon = Icons.error_outline_rounded;
+      headline = 'Needs attention';
+    } else if (busy) {
+      bg = const Color(0xFFE8EEF8);
+      fg = const Color(0xFF2F4F7A);
+      icon = Icons.sync_rounded;
+      headline = snap.stepLabel ?? 'Working…';
+    } else if (snap.onGateway && pending > 0) {
+      bg = AppColors.warnBg;
+      fg = AppColors.warn;
+      icon = Icons.cloud_off_outlined;
+      headline = 'On SoftAP · cloud waiting';
+    } else if (snap.onGateway) {
+      bg = AppColors.okBg;
+      fg = AppColors.okInk;
+      icon = Icons.check_circle_rounded;
+      headline = 'Connected to sensor';
+    } else if (pending > 0) {
+      bg = AppColors.warnBg;
+      fg = AppColors.warn;
+      icon = Icons.cloud_upload_outlined;
+      headline = '$pending waiting to send';
+    } else if (snap.hasInternet) {
+      bg = AppColors.okBg;
+      fg = AppColors.okInk;
+      icon = Icons.cloud_done_outlined;
+      headline = 'Online';
+    } else {
+      bg = AppColors.warnBg;
+      fg = AppColors.warn;
+      icon = Icons.wifi_off_rounded;
+      headline = snap.stepLabel ?? 'Waiting';
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.outline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                if (busy)
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: fg),
+                  )
+                else
+                  Icon(icon, size: 18, color: fg),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    headline,
+                    style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      color: fg,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            snap.message,
+            style: GoogleFonts.poppins(
+              color: AppColors.ink,
+              fontSize: 13,
+              height: 1.35,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          if (snap.hint != null && snap.hint!.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              snap.hint!,
+              style: GoogleFonts.poppins(
+                color: AppColors.muted,
+                fontSize: 12,
+                height: 1.4,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+          if (snap.lastError != null && isError) ...[
+            const SizedBox(height: 6),
+            Text(
+              snap.lastError!,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.poppins(
+                color: AppColors.danger,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PrimaryAction extends StatelessWidget {
+  const _PrimaryAction({
+    required this.snap,
+    required this.busy,
+    required this.actionBusy,
+    required this.pending,
+    required this.onWifi,
+    required this.onConnect,
+    required this.onSync,
+  });
+
+  final AutoSyncSnapshot snap;
+  final bool busy;
+  final bool actionBusy;
+  final int pending;
+  final VoidCallback onWifi;
+  final VoidCallback onConnect;
+  final VoidCallback onSync;
+
+  @override
+  Widget build(BuildContext context) {
+    final isError = snap.phase == AutoSyncPhase.error;
+
+    if (!snap.wifiOn && !snap.hasInternet) {
+      return FilledButton.icon(
+        onPressed: busy ? null : onWifi,
+        icon: const Icon(Icons.wifi_rounded),
+        label: Text(actionBusy ? 'Opening WiFi…' : 'Turn on WiFi'),
+      );
+    }
+
+    if (isError || pending > 0) {
+      return FilledButton.icon(
+        onPressed: busy ? null : onSync,
+        icon: Icon(
+          busy ? Icons.hourglass_top_rounded : Icons.sync_rounded,
+        ),
+        label: Text(
+          busy
+              ? 'Working…'
+              : (isError ? 'Retry Sync' : 'Sync to cloud'),
+        ),
+      );
+    }
+
+    if (!snap.onGateway) {
+      return FilledButton.icon(
+        onPressed: busy ? null : onConnect,
+        icon: const Icon(Icons.wifi_tethering_rounded),
+        label: Text(actionBusy ? 'Connecting…' : 'Connect to sensor'),
+      );
+    }
+
+    return FilledButton.icon(
+      onPressed: busy ? null : onSync,
+      icon: const Icon(Icons.sync_rounded),
+      label: Text(busy ? 'Working…' : 'Sync now'),
+    );
+  }
+}
+
+class _ChartHeader extends StatelessWidget {
+  const _ChartHeader({required this.range, required this.onChanged});
+  final _ChartRange range;
+  final ValueChanged<_ChartRange> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Level trend',
+                style: GoogleFonts.poppins(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                'Reservoir elevation',
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  color: AppColors.muted,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: AppColors.panelSoft,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: AppColors.outline),
+          ),
+          child: Row(
+            children: [
+              for (final entry in {
+                _ChartRange.h24: '24h',
+                _ChartRange.d7: '7d',
+              }.entries)
+                InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => onChanged(entry.key),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: range == entry.key
+                          ? AppColors.surface
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      entry.value,
+                      style: GoogleFonts.poppins(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: range == entry.key
+                            ? AppColors.deepTeal
+                            : AppColors.muted,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

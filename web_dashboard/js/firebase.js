@@ -56,6 +56,16 @@ export async function loadReadings(stationId) {
   return snap.val() || {};
 }
 
+/** Live readings map so the chart/table stay in sync with the phone. */
+export function listenReadings(stationId, callback) {
+  if (isDemoMode) {
+    callback(window.WATERLEVEL_DEMO.readings[stationId] || {});
+    return () => {};
+  }
+  const r = ref(db, `water/readings/${stationId}`);
+  return onValue(r, (snap) => callback(snap.val() || {}));
+}
+
 export function listenConnection(callback) {
   if (isDemoMode) {
     callback("demo");

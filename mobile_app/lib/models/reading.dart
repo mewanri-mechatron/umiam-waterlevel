@@ -1,4 +1,5 @@
 import '../core/constants/app_constants.dart';
+import '../core/utils/water_level_math.dart';
 
 class Reading {
   const Reading({
@@ -106,7 +107,48 @@ class Reading {
         isSimulated: (map['is_simulated'] as int? ?? 0) == 1,
       );
 
-  Map<String, Object?> toFirebaseMap({required int uploadedAt}) {
+  /// Rebuild a local reading from an RTDB node written by [toFirebaseMap].
+  /// Marks as already uploaded so restore does not re-push the same keys.
+  factory Reading.fromFirebaseMap({
+    required String stationId,
+    required Map<Object?, Object?> map,
+    required int createdAt,
+  }) {
+    final bootId = (map['boot_id'] as num?)?.toInt() ?? 0;
+    final seq = (map['seq'] as num?)?.toInt() ?? 0;
+    final measurementTime = (map['measurement_time'] as num?)?.toInt() ?? 0;
+    final receivedTime = (map['received_time'] as num?)?.toInt() ??
+        measurementTime;
+    final ageSeconds = (map['age_seconds'] as num?)?.toInt() ?? 0;
+    final distanceMm = (map['distance_mm'] as num?)?.toInt();
+    // Prefer true sensor raw level; older uploads may only have display level.
+    final sensorLevel = (map['sensor_level_mm'] as num?)?.toInt() ??
+        (map['water_level_mm'] as num?)?.toInt();
+    return Reading(
+      stationId: stationId,
+      bootId: bootId,
+      seq: seq,
+      measurementTime: measurementTime,
+      receivedTime: receivedTime,
+      ageSeconds: ageSeconds,
+      distanceMm: distanceMm,
+      waterLevelMm: sensorLevel,
+      status: (map['status'] as num?)?.toInt() ?? 0,
+      validSamples: (map['valid_samples'] as num?)?.toInt() ?? 0,
+      sendIntervalSeconds:
+          (map['send_interval_seconds'] as num?)?.toInt() ?? 0,
+      firebaseUploaded: true,
+      createdAt: createdAt,
+      isSimulated: false,
+    );
+  }
+
+  Map<String, Object?> toFirebaseMap({
+    required int uploadedAt,
+    int? calibActualMm,
+    int? calibRawLevelMm,
+    int? calibDistanceMm,
+  }) {
     final map = <String, Object?>{
       'boot_id': bootId,
       'seq': seq,
@@ -124,10 +166,21 @@ class Reading {
       map['distance_m'] =
           double.parse((distanceMm! / 1000.0).toStringAsFixed(2));
     }
+    // Sensor raw level from Node B (unchanged).
     if (waterLevelMm != null && waterLevelMm != AppConstants.unavailableMm) {
-      map['water_level_mm'] = waterLevelMm;
-      map['water_level_m'] =
+      map['sensor_level_mm'] = waterLevelMm;
+      map['sensor_level_m'] =
           double.parse((waterLevelMm! / 1000.0).toStringAsFixed(2));
+    }
+    final display = resolveDisplayLevelMm(
+      referenceActualMm: calibActualMm,
+      referenceDistanceMm: calibDistanceMm,
+      currentDistanceMm: distanceMm,
+    );
+    if (display != null) {
+      map['water_level_mm'] = display;
+      map['water_level_m'] =
+          double.parse((display / 1000.0).toStringAsFixed(2));
     }
     return map;
   }

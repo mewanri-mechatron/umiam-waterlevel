@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/constants/app_constants.dart';
+import '../core/utils/display_units.dart';
 import '../database/app_database.dart';
 import '../models/reading.dart';
 import '../models/station.dart';
@@ -45,6 +46,28 @@ class UseMockGatewayNotifier extends StateNotifier<bool> {
   }
 }
 
+final displayLengthUnitProvider =
+    StateNotifierProvider<DisplayLengthUnitNotifier, DisplayLengthUnit>((ref) {
+  final prefs = ref.watch(sharedPreferencesProvider);
+  return DisplayLengthUnitNotifier(prefs);
+});
+
+class DisplayLengthUnitNotifier extends StateNotifier<DisplayLengthUnit> {
+  DisplayLengthUnitNotifier(this._prefs)
+      : super(
+          DisplayLengthUnitX.fromPrefs(
+            _prefs.getString(AppConstants.prefsDisplayLengthUnit),
+          ),
+        );
+
+  final SharedPreferences _prefs;
+
+  Future<void> setUnit(DisplayLengthUnit unit) async {
+    state = unit;
+    await _prefs.setString(AppConstants.prefsDisplayLengthUnit, unit.prefsValue);
+  }
+}
+
 final mockGatewayProvider = Provider<MockGatewayService>((ref) {
   return MockGatewayService();
 });
@@ -69,7 +92,11 @@ final syncServiceProvider = Provider<SyncService>((ref) {
 });
 
 final auditLogServiceProvider = ChangeNotifierProvider<AuditLogService>((ref) {
-  return AuditLogService(ref.watch(appDatabaseProvider));
+  return AuditLogService(
+    ref.watch(appDatabaseProvider),
+    firebase: ref.watch(firebaseServiceProvider),
+    network: ref.watch(networkServiceProvider),
+  );
 });
 
 final autoSyncControllerProvider =
@@ -170,7 +197,7 @@ class DashboardDataNotifier extends AsyncNotifier<DashboardData> {
 }
 
 final historyFilterProvider =
-    StateProvider<HistoryFilter>((ref) => HistoryFilter.last24h);
+    StateProvider<HistoryFilter>((ref) => HistoryFilter.last7d);
 
 enum HistoryFilter { last24h, last7d, last30d, all, custom }
 

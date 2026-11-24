@@ -67,8 +67,12 @@ class DashboardScreen extends ConsumerWidget {
                   ),
                 ),
               _LevelHero(
-                mountConfigured: data.station.mountHeightMm != null,
-                waterLevelMm: data.latest?.waterLevelMm,
+                mountConfigured: data.station.hasCalibration,
+                waterLevelMm: resolveDisplayLevelMm(
+                  referenceActualMm: data.station.calibActualMm,
+                  referenceDistanceMm: data.station.calibDistanceMm,
+                  currentDistanceMm: data.latest?.distanceMm,
+                ),
                 distanceMm: data.latest?.distanceMm,
                 status: data.latest?.status,
               ),
@@ -108,10 +112,10 @@ class DashboardScreen extends ConsumerWidget {
                   ('Last measurement', _fmt(data.latest?.measurementTime)),
                   ('Last cloud upload', _fmt(data.syncState.lastUploadTime)),
                   (
-                    'Mount height',
-                    data.station.mountHeightMm == null
-                        ? 'Not configured'
-                        : '${data.station.mountHeightMm} mm'
+                    'Calibration',
+                    data.station.hasCalibration
+                        ? 'Actual ${(data.station.calibActualMm! / 1000).toStringAsFixed(2)} ft'
+                        : 'Not set (use Setup)'
                   ),
                 ],
               ),
@@ -128,7 +132,10 @@ class DashboardScreen extends ConsumerWidget {
               Card(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
-                  child: LevelChart(readings: data.recent),
+                  child: LevelChart(
+                    readings: data.recent,
+                    station: data.station,
+                  ),
                 ),
               ),
             ],
@@ -206,10 +213,9 @@ class _LevelHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final metres = waterLevelMm == null || waterLevelMm == 0xFFFF
+    final feet = waterLevelMm == null || waterLevelMm == 0xFFFF
         ? null
         : waterLevelMm! / 1000.0;
-    final cm = metres == null ? null : metres * 100.0;
 
     return Container(
       width: double.infinity,
@@ -242,12 +248,12 @@ class _LevelHero extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0, end: metres ?? 0),
+            tween: Tween(begin: 0, end: feet ?? 0),
             duration: const Duration(milliseconds: 700),
             curve: Curves.easeOutCubic,
             builder: (context, value, _) {
               return Text(
-                metres == null ? '—' : value.toStringAsFixed(2),
+                feet == null ? '—' : value.toStringAsFixed(2),
                 style: GoogleFonts.manrope(
                   fontSize: 64,
                   fontWeight: FontWeight.w800,
@@ -260,7 +266,7 @@ class _LevelHero extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            'metres',
+            'feet AMSL',
             style: GoogleFonts.manrope(
               color: Colors.white70,
               fontWeight: FontWeight.w600,
@@ -278,9 +284,9 @@ class _LevelHero extends StatelessWidget {
             child: Column(
               children: [
                 Text(
-                  cm == null
+                  feet == null
                       ? '—'
-                      : '${cm.toStringAsFixed(0)} cm  ·  ${waterLevelMm ?? '—'} mm',
+                      : '${feet.toStringAsFixed(2)} ft AMSL',
                   style: GoogleFonts.manrope(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -288,7 +294,7 @@ class _LevelHero extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'Distance: ${formatDistanceMeters(distanceMm)}'
+                  'Raw gap: ${formatDistanceMeters(distanceMm)}'
                   '${status == null ? '' : '  ·  ${sensorStatusLabel(status!)}'}',
                   textAlign: TextAlign.center,
                   style: GoogleFonts.manrope(

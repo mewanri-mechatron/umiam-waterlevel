@@ -146,14 +146,28 @@ class SiteSyncService : Service() {
             sleepQuiet(18_000)
         }
 
-        val bound = NetworkBinder.bindToInternet(applicationContext)
+        // SoftAP has no internet. Prefer binding to LTE; if that fails while still
+        // on WaterLevel, briefly pause WiFi so mobile data becomes the route.
+        var wifiPaused = false
+        var bound = NetworkBinder.bindToInternet(applicationContext)
+        if ((!bound || NetworkBinder.isOnGateway(applicationContext)) &&
+            !NetworkBinder.hasValidatedInternet(applicationContext)
+        ) {
+            updateNotification("Pausing SoftAP WiFi for cloud upload…")
+            wifiPaused = pauseWifiForUpload()
+            sleepQuiet(4_000)
+            bound = NetworkBinder.bindToInternet(applicationContext)
+        }
         Log.i(
             TAG,
-            "upload phase bindInternet=$bound validated=${NetworkBinder.hasValidatedInternet(applicationContext)}",
+            "upload phase bindInternet=$bound validated=${NetworkBinder.hasValidatedInternet(applicationContext)} wifiPaused=$wifiPaused",
         )
         if (!bound && !NetworkBinder.hasValidatedInternet(applicationContext)) {
-            updateNotification("Waiting for internet (LTE/WiFi) to upload…")
+            updateNotification(
+                "Waiting for internet — leave WaterLevel WiFi or turn on mobile data",
+            )
             Log.i(TAG, "cycle done — no internet for upload")
+            if (wifiPaused) resumeWifiAfterUpload()
             return
         }
 
@@ -162,6 +176,12 @@ class SiteSyncService : Service() {
         Log.i(TAG, "native upload: ${native.message} uploaded=${native.uploaded} left=${native.pendingLeft}")
         enqueueFlutterSync("upload")
         sleepQuiet(3_000)
+
+        if (wifiPaused) {
+            updateNotification("Restoring WiFi for next sensor pull…")
+            resumeWifiAfterUpload()
+            sleepQuiet(2_000)
+        }
 
         updateNotification(
             when {
@@ -172,12 +192,43 @@ class SiteSyncService : Service() {
                 native.pendingLeft == 0 ->
                     "Cloud up to date"
                 NetworkBinder.isOnGateway(applicationContext) ->
-                    "On WaterLevel · ${native.pendingLeft} waiting for next upload"
+                    "On WaterLevel · ${native.pendingLeft} waiting — will retry upload"
                 else ->
                     "Online · ${native.pendingLeft} pending (${native.message})"
             },
         )
         Log.i(TAG, "cycle done")
+    }
+
+    /** Best-effort SoftAP release so LTE can carry Firebase traffic. */
+    private fun pauseWifiForUpload(): Boolean {
+        return try {
+            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            NetworkBinder.clearBinding(applicationContext)
+            @Suppress("DEPRECATION")
+            if (wifi.isWifiEnabled) {
+                @Suppress("DEPRECATION")
+                wifi.setWifiEnabled(false)
+            } else {
+                true
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not pause WiFi for upload", t)
+            false
+        }
+    }
+
+    private fun resumeWifiAfterUpload() {
+        try {
+            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            if (!wifi.isWifiEnabled) {
+                @Suppress("DEPRECATION")
+                wifi.setWifiEnabled(true)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not restore WiFi after upload", t)
+        }
     }
 
     private fun scheduleNextAlarm() {

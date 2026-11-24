@@ -11,7 +11,6 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  final _mountController = TextEditingController();
   final _intervalController = TextEditingController(text: '30');
   bool _loaded = false;
   bool _savingInterval = false;
@@ -26,7 +25,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   @override
   void dispose() {
-    _mountController.dispose();
     _intervalController.dispose();
     super.dispose();
   }
@@ -69,7 +67,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         error: (e, _) => Center(child: Text('$e')),
         data: (station) {
           if (!_loaded) {
-            _mountController.text = station.mountHeightMm?.toString() ?? '';
             if (latestInterval != null) {
               _intervalController.text = '$latestInterval';
             }
@@ -90,45 +87,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text('${station.name} (${station.id})'),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: _mountController,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: 'Mounting height (mm)',
-                          helperText:
-                              'Optional fallback if Node B does not send level',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      FilledButton(
-                        onPressed: () async {
-                          final text = _mountController.text.trim();
-                          final value =
-                              text.isEmpty ? null : int.tryParse(text);
-                          if (text.isNotEmpty && value == null) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Enter a valid integer mm value'),
-                              ),
-                            );
-                            return;
-                          }
-                          await ref
-                              .read(stationRepositoryProvider)
-                              .updateMountHeight(value);
-                          ref.invalidate(stationProvider);
-                          ref.invalidate(dashboardDataProvider);
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Mount height saved'),
-                              ),
-                            );
-                          }
-                        },
-                        child: const Text('Save mount height'),
+                      const SizedBox(height: 8),
+                      Text(
+                        station.hasCalibration
+                            ? 'Calibration set (use Setup tab to change)'
+                            : 'No calibration yet — set actual water level on Setup',
                       ),
                     ],
                   ),

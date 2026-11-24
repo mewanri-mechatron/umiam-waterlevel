@@ -6,8 +6,11 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../app/providers.dart';
 import '../../app/theme.dart';
 import '../../core/constants/app_constants.dart';
+import '../../widgets/unit_picker.dart';
 
-/// Fallback + Node B config — open from the home gear icon.
+enum _IntervalUnit { seconds, minutes, hours }
+
+/// Sensor interval and manual connect — calibration is on Setup.
 class AdvancedScreen extends ConsumerStatefulWidget {
   const AdvancedScreen({super.key});
 
@@ -16,41 +19,73 @@ class AdvancedScreen extends ConsumerStatefulWidget {
 }
 
 class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
-  final _intervalController = TextEditingController(text: '30');
+  final _valueController = TextEditingController(text: '30');
+  _IntervalUnit _unit = _IntervalUnit.seconds;
   String? _note;
   String? _intervalNote;
   bool _busy = false;
   bool _savingInterval = false;
-  /// Value last sent via /config (what Node B is waiting to apply).
   int? _requestedInterval;
-  /// pending_interval from /status (Node B side).
   int? _pendingInterval;
-  /// latest.interval from /status or last phone reading.
   int? _appliedInterval;
 
   static const _presets = <(String, int)>[
-    ('30s', 30),
-    ('1m', 60),
-    ('5m', 300),
-    ('15m', 900),
+    ('30 sec', 30),
+    ('1 min', 60),
+    ('5 min', 300),
+    ('15 min', 900),
+    ('30 min', 1800),
+    ('1 hour', 3600),
   ];
 
   @override
   void dispose() {
-    _intervalController.dispose();
+    _valueController.dispose();
     super.dispose();
   }
 
-  void _setField(int seconds, {bool force = false}) {
-    // Don't clobber what the user is typing unless we just applied / loaded.
-    if (force || !_intervalController.value.composing.isValid) {
-      final text = '$seconds';
-      if (_intervalController.text != text) {
-        _intervalController.value = TextEditingValue(
-          text: text,
-          selection: TextSelection.collapsed(offset: text.length),
-        );
-      }
+  String _friendlySeconds(int seconds) {
+    if (seconds % 3600 == 0) return '${seconds ~/ 3600} hour${seconds == 3600 ? '' : 's'}';
+    if (seconds % 60 == 0) {
+      final m = seconds ~/ 60;
+      return '$m min';
+    }
+    return '$seconds sec';
+  }
+
+  void _setFieldFromSeconds(int seconds, {bool force = false}) {
+    if (!force && _valueController.value.composing.isValid) return;
+    late final String text;
+    late final _IntervalUnit unit;
+    if (seconds >= 3600 && seconds % 3600 == 0) {
+      unit = _IntervalUnit.hours;
+      text = '${seconds ~/ 3600}';
+    } else if (seconds >= 60 && seconds % 60 == 0) {
+      unit = _IntervalUnit.minutes;
+      text = '${seconds ~/ 60}';
+    } else {
+      unit = _IntervalUnit.seconds;
+      text = '$seconds';
+    }
+    setState(() => _unit = unit);
+    if (_valueController.text != text) {
+      _valueController.value = TextEditingValue(
+        text: text,
+        selection: TextSelection.collapsed(offset: text.length),
+      );
+    }
+  }
+
+  int? _secondsFromField() {
+    final raw = double.tryParse(_valueController.text.trim());
+    if (raw == null || raw <= 0) return null;
+    switch (_unit) {
+      case _IntervalUnit.seconds:
+        return raw.round();
+      case _IntervalUnit.minutes:
+        return (raw * 60).round();
+      case _IntervalUnit.hours:
+        return (raw * 3600).round();
     }
   }
 
@@ -63,33 +98,34 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
         _pendingInterval =
             status.pendingInterval > 0 ? status.pendingInterval : null;
         if (latest != null) _appliedInterval = latest;
-        // Prefer showing the pending/requested target in the box.
         final show = _pendingInterval ?? _requestedInterval ?? latest;
         if (overwriteField && show != null) {
-          _setField(show, force: true);
+          _setFieldFromSeconds(show, force: true);
         }
         if (_pendingInterval != null) {
           _intervalNote =
-              'Node B pending ${_pendingInterval}s — applies after Node A’s next send.';
+              'Pending ${_friendlySeconds(_pendingInterval!)} — applies after next send.';
         } else if (_requestedInterval != null &&
             _appliedInterval != null &&
             _requestedInterval != _appliedInterval) {
           _intervalNote =
-              'Requested ${_requestedInterval}s · Node B still reporting ${_appliedInterval}s.';
+              'Requested ${_friendlySeconds(_requestedInterval!)} · '
+              'sensor still ${_friendlySeconds(_appliedInterval!)}.';
         } else if (_appliedInterval != null) {
-          _intervalNote = 'Current interval: ${_appliedInterval}s';
+          _intervalNote =
+              'Current: ${_friendlySeconds(_appliedInterval!)}';
           _requestedInterval = null;
         } else {
           _intervalNote = null;
         }
       });
     } catch (_) {
-      // Not on SoftAP — keep local requested value.
       if (!mounted) return;
       setState(() {
         if (_requestedInterval != null) {
           _intervalNote =
-              'Requested ${_requestedInterval}s. Rejoin WaterLevel WiFi to confirm.';
+              'Requested ${_friendlySeconds(_requestedInterval!)}. '
+              'Join sensor WiFi to confirm.';
         }
       });
     }
@@ -101,24 +137,23 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
       _savingInterval = true;
       _requestedInterval = clamped;
       _pendingInterval = clamped;
-      _intervalNote = 'Sending /config?interval=$clamped…';
+      _intervalNote = 'Sending ${_friendlySeconds(clamped)}…';
     });
-    _setField(clamped, force: true);
+    _setFieldFromSeconds(clamped, force: true);
     try {
       await ref.read(gatewayClientProvider).setSendInterval(clamped);
       if (!mounted) return;
       setState(() {
         _intervalNote =
-            'Sent $clamped s. Pending until Node A’s next send.';
+            'Sent ${_friendlySeconds(clamped)}. Applies after next send.';
       });
-      // Refresh status but keep the requested value in the field.
       await _refreshStatus(overwriteField: false);
-      _setField(clamped, force: true);
+      _setFieldFromSeconds(clamped, force: true);
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _intervalNote =
-            'Could not set interval. Join WaterLevel WiFi first.\n$e';
+            'Could not set. Join sensor WiFi first.\n$e';
       });
     } finally {
       if (mounted) setState(() => _savingInterval = false);
@@ -128,7 +163,7 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       final latest = ref
           .read(dashboardDataProvider)
           .asData
@@ -137,9 +172,9 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
           ?.sendIntervalSeconds;
       if (latest != null) {
         _appliedInterval = latest;
-        _setField(latest, force: true);
+        _setFieldFromSeconds(latest, force: true);
       }
-      _refreshStatus(overwriteField: true);
+      await _refreshStatus(overwriteField: true);
     });
   }
 
@@ -147,29 +182,31 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
   Widget build(BuildContext context) {
     final displayApplied = _appliedInterval;
     final displayPending = _pendingInterval ?? _requestedInterval;
-    final selected = int.tryParse(_intervalController.text.trim());
+    final selectedSeconds = _secondsFromField();
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF3F7F5),
+      backgroundColor: AppColors.mist,
       appBar: AppBar(
-        title: const Text('Settings'),
-        backgroundColor: const Color(0xFFF3F7F5),
+        title: const Text('Advanced'),
+        backgroundColor: AppColors.mist,
       ),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
         children: [
           Text(
-            'Sensor interval and manual WiFi connect.',
+            'How often the sensor sends a reading.\n'
+            'Water level setup is on the Setup tab.',
             style: GoogleFonts.manrope(
               color: AppColors.muted,
               fontWeight: FontWeight.w600,
+              height: 1.4,
             ),
           ),
           const SizedBox(height: 12),
           OutlinedButton.icon(
             onPressed: () => context.push('/audit'),
             icon: const Icon(Icons.receipt_long_outlined),
-            label: const Text('Open audit log'),
+            label: const Text('Activity log'),
           ),
           const SizedBox(height: 14),
           Material(
@@ -186,19 +223,48 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Node A send interval',
+                    'Display units',
+                    style: GoogleFonts.manrope(fontWeight: FontWeight.w800),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Water level and raw level on Level / History.',
+                    style: const TextStyle(color: AppColors.muted, height: 1.35),
+                  ),
+                  const SizedBox(height: 12),
+                  const UnitPicker(),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: AppColors.line),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Send every…',
                     style: GoogleFonts.manrope(fontWeight: FontWeight.w800),
                   ),
                   const SizedBox(height: 6),
                   Text(
                     [
                       if (displayApplied != null)
-                        'Applied on readings: ${displayApplied}s',
+                        'Now: ${_friendlySeconds(displayApplied)}',
                       if (displayPending != null &&
                           displayPending != displayApplied)
-                        'Target / pending: ${displayPending}s',
+                        'Next: ${_friendlySeconds(displayPending)}',
                       if (displayApplied == null && displayPending == null)
-                        'Join WaterLevel WiFi, then set 10–3600 seconds.',
+                        'Join sensor WiFi, then choose a time (10 sec – 1 hour).',
                     ].join(' · '),
                     style: const TextStyle(color: AppColors.muted, height: 1.35),
                   ),
@@ -210,14 +276,14 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                       for (final p in _presets)
                         OutlinedButton(
                           style: OutlinedButton.styleFrom(
-                            backgroundColor: selected == p.$2
+                            backgroundColor: selectedSeconds == p.$2
                                 ? AppColors.deepTeal.withValues(alpha: 0.12)
                                 : null,
                             side: BorderSide(
-                              color: selected == p.$2
+                              color: selectedSeconds == p.$2
                                   ? AppColors.deepTeal
                                   : AppColors.line,
-                              width: selected == p.$2 ? 2 : 1,
+                              width: selectedSeconds == p.$2 ? 2 : 1,
                             ),
                           ),
                           onPressed: _savingInterval
@@ -227,16 +293,56 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                         ),
                     ],
                   ),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Or type a value',
+                    style: GoogleFonts.manrope(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<_IntervalUnit>(
+                    segments: const [
+                      ButtonSegment(
+                        value: _IntervalUnit.seconds,
+                        label: Text('Seconds'),
+                      ),
+                      ButtonSegment(
+                        value: _IntervalUnit.minutes,
+                        label: Text('Minutes'),
+                      ),
+                      ButtonSegment(
+                        value: _IntervalUnit.hours,
+                        label: Text('Hours'),
+                      ),
+                    ],
+                    selected: {_unit},
+                    onSelectionChanged: (s) {
+                      setState(() => _unit = s.first);
+                    },
+                  ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
                       Expanded(
                         child: TextField(
-                          controller: _intervalController,
-                          keyboardType: TextInputType.number,
-                          decoration: const InputDecoration(
-                            labelText: 'Custom (seconds)',
-                            border: OutlineInputBorder(),
+                          controller: _valueController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: switch (_unit) {
+                              _IntervalUnit.seconds => 'Seconds',
+                              _IntervalUnit.minutes => 'Minutes',
+                              _IntervalUnit.hours => 'Hours',
+                            },
+                            hintText: switch (_unit) {
+                              _IntervalUnit.seconds => '30',
+                              _IntervalUnit.minutes => '5',
+                              _IntervalUnit.hours => '1',
+                            },
+                            border: const OutlineInputBorder(),
                           ),
                         ),
                       ),
@@ -245,24 +351,26 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                         onPressed: _savingInterval
                             ? null
                             : () {
-                                final v = int.tryParse(
-                                  _intervalController.text.trim(),
-                                );
-                                if (v == null || v < 10 || v > 3600) {
+                                final sec = _secondsFromField();
+                                if (sec == null || sec < 10 || sec > 3600) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     const SnackBar(
-                                      content: Text('Enter 10–3600 seconds'),
+                                      content: Text(
+                                        'Use a time between 10 seconds and 1 hour',
+                                      ),
                                     ),
                                   );
                                   return;
                                 }
-                                _applyInterval(v);
+                                _applyInterval(sec);
                               },
                         child: _savingInterval
                             ? const SizedBox(
                                 width: 18,
                                 height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               )
                             : const Text('Apply'),
                       ),
@@ -294,12 +402,12 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Connect manually',
+                    'Connect to sensor',
                     style: GoogleFonts.manrope(fontWeight: FontWeight.w800),
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Join SSID ${AppConstants.gatewaySsid} (password ${AppConstants.gatewayPassword}) so the phone can pull readings from the ESP.',
+                    'WiFi name ${AppConstants.gatewaySsid} · password ${AppConstants.gatewayPassword}',
                     style: const TextStyle(color: AppColors.muted, height: 1.35),
                   ),
                   const SizedBox(height: 14),
@@ -318,7 +426,7 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                               setState(() {
                                 _busy = false;
                                 _note =
-                                    'WiFi is off. Turn it on in the system panel, then tap Connect again.';
+                                    'WiFi is off. Turn it on, then try again.';
                               });
                               return;
                             }
@@ -341,7 +449,7 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                             });
                           },
                     child: Text(
-                      _busy ? 'Connecting…' : 'Connect to WaterLevel WiFi',
+                      _busy ? 'Connecting…' : 'Connect to sensor WiFi',
                     ),
                   ),
                 ],

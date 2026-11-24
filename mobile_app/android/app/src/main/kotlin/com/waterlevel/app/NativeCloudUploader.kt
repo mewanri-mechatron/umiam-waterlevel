@@ -89,12 +89,17 @@ object NativeCloudUploader {
             .put("name", "Umiam Dam")
             .put("last_updated", System.currentTimeMillis() / 1000)
         db.rawQuery(
-            "SELECT name, mount_height_mm FROM stations WHERE id=? LIMIT 1",
+            """
+            SELECT name, calib_actual_mm, calib_raw_level_mm, calib_distance_mm
+            FROM stations WHERE id=? LIMIT 1
+            """.trimIndent(),
             arrayOf(STATION_ID),
         ).use { c ->
             if (c.moveToFirst()) {
                 obj.put("name", c.getString(0) ?: "Umiam Dam")
-                if (!c.isNull(1)) obj.put("mount_height_mm", c.getInt(1))
+                if (!c.isNull(1)) obj.put("calib_actual_mm", c.getInt(1))
+                if (!c.isNull(2)) obj.put("calib_raw_level_mm", c.getInt(2))
+                if (!c.isNull(3)) obj.put("calib_distance_mm", c.getInt(3))
             }
         }
         return obj
@@ -185,10 +190,26 @@ object NativeCloudUploader {
     ): Boolean {
         val updates = JSONObject()
         var newest: JSONObject? = null
+        val actual = if (station.has("calib_actual_mm")) station.getInt("calib_actual_mm") else null
+        val refDist = if (station.has("calib_distance_mm")) station.getInt("calib_distance_mm") else null
         for (row in batch) {
             val key = row.getString("_key")
             val clean = JSONObject(row.toString())
             clean.remove("_key")
+            // Preserve Node B raw level field; display water_level = actual + Δgap.
+            if (clean.has("water_level_mm")) {
+                val raw = clean.getInt("water_level_mm")
+                clean.put("sensor_level_mm", raw)
+                clean.put("sensor_level_m", metres(raw))
+            }
+            // Elevation stored as feet×1000; gap is true mm → Δft = Δmm / 304.8
+            if (actual != null && refDist != null && clean.has("distance_mm")) {
+                val deltaFt = (refDist - clean.getInt("distance_mm")) / 304.8
+                val computed = (actual + deltaFt * 1000.0).roundToInt()
+                clean.put("water_level_mm", computed)
+                // Legacy field name: value is feet AMSL, not metres.
+                clean.put("water_level_m", (computed / 1000.0 * 100.0).roundToInt() / 100.0)
+            }
             updates.put("water/readings/$STATION_ID/$key", clean)
             newest = newer(newest, clean)
         }

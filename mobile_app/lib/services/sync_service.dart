@@ -6,6 +6,7 @@ import '../core/utils/water_level_math.dart';
 import '../database/app_database.dart';
 import '../models/gateway_models.dart';
 import '../models/reading.dart';
+import '../models/station.dart';
 import 'firebase_service.dart';
 import 'gateway_client.dart';
 import 'network_service.dart';
@@ -40,6 +41,22 @@ class UploadResult {
   final String? message;
 }
 
+class CloudPullResult {
+  const CloudPullResult({
+    required this.fetched,
+    required this.inserted,
+    required this.duplicates,
+    this.calibActualMm,
+    this.message,
+  });
+
+  final int fetched;
+  final int inserted;
+  final int duplicates;
+  final int? calibActualMm;
+  final String? message;
+}
+
 class SyncService {
   SyncService({
     required AppDatabase database,
@@ -60,6 +77,24 @@ class SyncService {
   bool _uploadInFlight = false;
 
   void updateGateway(GatewayClient gateway) => _gateway = gateway;
+
+  Future<int> countLocalReadings({
+    String stationId = AppConstants.defaultStationId,
+  }) =>
+      _db.countReadings(stationId);
+
+  /// Drop phone readings before local midnight today.
+  Future<int> purgeLocalReadingsBeforeToday({
+    String stationId = AppConstants.defaultStationId,
+  }) async {
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month, now.day);
+    final beforeEpoch = start.millisecondsSinceEpoch ~/ 1000;
+    return _db.deleteReadingsBefore(
+      stationId: stationId,
+      beforeEpoch: beforeEpoch,
+    );
+  }
 
   /// Workflow A: ESP8266 → phone (ACK only after SQLite commit).
   Future<DownloadResult> downloadFromGateway({
@@ -92,39 +127,48 @@ class SyncService {
 
     final dtos = await _gateway.getData(sinceId: 0);
     final receiveTime = DateTime.now();
+    final receiveSec = receiveTime.millisecondsSinceEpoch ~/ 1000;
     final readings = <Reading>[];
     var maxRecordId = 0;
 
-    for (final dto in dtos) {
+    // Node B often collapses `ts` after power loss (no RTC). Rebuild then.
+    final measurementTimes = resolveBatchMeasurementTimes(
+      hints: [
+        for (final dto in dtos)
+          GatewayTimeHint(
+            recordId: dto.recordId,
+            bootId: dto.bootId,
+            seq: dto.seq,
+            measurementTime: dto.measurementTime,
+            ageSeconds: dto.ageSeconds,
+            sendIntervalSeconds: dto.sendIntervalSeconds,
+          ),
+      ],
+      receiveEpochSeconds: receiveSec,
+    );
+
+    for (var i = 0; i < dtos.length; i++) {
+      final dto = dtos[i];
       final id = dto.recordId ?? 0;
       if (id > maxRecordId) maxRecordId = id;
 
-      // Prefer Node B absolute ts; fall back to age-based estimate.
-      final measurementSec = dto.measurementTime ??
-          measurementTimeFromAge(
-            receiveTime: receiveTime,
-            ageSeconds: dto.ageSeconds,
-          ).millisecondsSinceEpoch ~/
-              1000;
-
       final distance = dto.distanceMm;
-      // Prefer Node B `level` (mm); else derive from mount height − distance.
-      int? water = dto.waterLevelMm;
-      water ??= calculateWaterLevelMm(
-        mountHeightMm: station.mountHeightMm,
-        distanceMm: distance,
-      );
+      // Keep Node B `level` as-is in water_level_mm (true sensor raw level).
+      // Display uses actual + gap change; raw Node B level kept for reference.
+      final sensorRawLevel = dto.waterLevelMm;
 
       readings.add(
         Reading(
           stationId: stationId,
           bootId: dto.bootId,
           seq: dto.seq,
-          measurementTime: measurementSec,
-          receivedTime: receiveTime.millisecondsSinceEpoch ~/ 1000,
-          ageSeconds: dto.ageSeconds,
+          measurementTime: measurementTimes[i],
+          receivedTime: receiveSec,
+          ageSeconds: dto.ageSeconds > 0
+              ? dto.ageSeconds
+              : (receiveSec - measurementTimes[i]).clamp(0, 86400 * 30),
           distanceMm: distance,
-          waterLevelMm: water,
+          waterLevelMm: sensorRawLevel,
           status: dto.status,
           validSamples: dto.validSamples,
           sendIntervalSeconds: dto.sendIntervalSeconds,
@@ -178,6 +222,103 @@ class SyncService {
       acked: acked,
       message: statusNote,
     );
+  }
+
+  /// Restore history from Firebase into local SQLite (e.g. after reinstall).
+  /// Inserts are idempotent on (station, boot, seq); already-local rows stay.
+  Future<CloudPullResult> pullFromFirebase({
+    String stationId = AppConstants.defaultStationId,
+  }) async {
+    await _network.bindToInternetNetwork();
+    final online = await _network.hasInternet();
+    if (!online) {
+      return const CloudPullResult(
+        fetched: 0,
+        inserted: 0,
+        duplicates: 0,
+        message: 'No internet. Cannot get cloud data.',
+      );
+    }
+
+    final ready = await _firebase.initialize();
+    if (!ready) {
+      return const CloudPullResult(
+        fetched: 0,
+        inserted: 0,
+        duplicates: 0,
+        message: 'Cloud is not set up on this phone.',
+      );
+    }
+
+    final station = await _db.getStation(stationId);
+    if (station == null) {
+      throw SyncException('Station $stationId missing');
+    }
+
+    int? cloudActual;
+    try {
+      final meta = await _firebase.fetchStationMeta(stationId);
+      cloudActual = meta?.calibActualMm;
+      if (cloudActual != null) {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        await _db.upsertStation(
+          Station(
+            id: station.id,
+            name: meta?.name ?? station.name,
+            gatewayIp: station.gatewayIp,
+            wifiSsid: station.wifiSsid,
+            calibActualMm: cloudActual,
+            calibRawLevelMm: meta?.calibRawLevelMm,
+            calibDistanceMm: meta?.calibDistanceMm,
+            createdAt: station.createdAt,
+            updatedAt: now,
+          ),
+        );
+      }
+    } catch (_) {
+      // Calibration restore is best-effort; readings still matter.
+    }
+
+    final remote = await _firebase.fetchReadings(stationId: stationId);
+    final result = await _db.insertReadings(remote);
+    final pending = await _db.countPending(stationId);
+    final sync = await _db.getSyncState(stationId);
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    await _db.updateSyncState(
+      sync.copyWith(
+        lastDownloadTime: now,
+        pendingUploadCount: pending,
+      ),
+    );
+
+    return CloudPullResult(
+      fetched: remote.length,
+      inserted: result.inserted.length,
+      duplicates: result.duplicates.length,
+      calibActualMm: cloudActual,
+      message: [
+        if (cloudActual != null) 'Got shared water-level setting',
+        if (result.inserted.isNotEmpty)
+          'Got ${result.inserted.length} new readings'
+        else if (remote.isEmpty)
+          'No cloud readings yet'
+        else
+          'Readings already on phone',
+      ].join(' · '),
+    );
+  }
+
+  /// Push station calibration so other phones can use the same actual level.
+  Future<void> pushCalibrationToCloud({
+    String stationId = AppConstants.defaultStationId,
+  }) async {
+    await _network.bindToInternetNetwork();
+    if (!await _network.hasInternet()) return;
+    final ready = await _firebase.initialize();
+    if (!ready) return;
+    final station = await _db.getStation(stationId);
+    if (station == null) return;
+    await _firebase.upsertStation(station);
   }
 
   /// Workflow B: phone → Firebase with retry/backoff.

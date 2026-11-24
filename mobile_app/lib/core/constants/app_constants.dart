@@ -11,6 +11,7 @@ class AppConstants {
   static const String prefsMountHeight = 'mount_height_mm';
   static const String prefsUseMockGateway = 'use_mock_gateway';
   static const String prefsStationId = 'station_id';
+  static const String prefsDisplayLengthUnit = 'display_length_unit';
   static const String firebaseDatabaseUrl =
       'https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app'; // no trailing slash
   static const String syncWorkName = 'waterlevel_firebase_sync';
