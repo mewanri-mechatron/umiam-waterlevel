@@ -77,8 +77,17 @@ const state = {
   chart: null,
   rainChart: null,
   rawChart: null,
+  forecastChart: null,
   chartResizeBound: false,
   weather: null
+};
+
+/** Operating bands in feet AMSL. */
+const ZONES = {
+  safeMax: 3200,
+  warnMax: 3210,
+  critMax: 3220,
+  gaugeMin: 3180
 };
 
 function $(id) {
@@ -535,6 +544,7 @@ function renderOverview() {
     ? Date.now() / 1000 - Number(latest.measurement_time)
     : null;
   const threshold = Math.max(120, (interval || 30) * 4);
+  const zone = zoneForFeet(levelFt);
   let condition = "Waiting";
   let badgeClass = "badge badge-muted";
   if (age == null) {
@@ -545,12 +555,18 @@ function renderOverview() {
   } else if (levelFt == null) {
     condition = "No level";
     badgeClass = "badge badge-warn";
-  } else if (age <= threshold) {
-    condition = "Normal";
-    badgeClass = "badge badge-muted";
-  } else {
+  } else if (zone.key === "crit") {
+    condition = "Critical";
+    badgeClass = "badge badge-danger";
+  } else if (zone.key === "warn") {
+    condition = "Warning";
+    badgeClass = "badge badge-warn";
+  } else if (age > threshold) {
     condition = "Delayed";
     badgeClass = "badge badge-warn";
+  } else {
+    condition = "Safe";
+    badgeClass = "badge badge-success";
   }
   $("dataStatusShort").textContent = condition;
   const badge = $("badgeCondition");
@@ -561,6 +577,19 @@ function renderOverview() {
 
   renderFreshnessCounter();
   renderChartSummary();
+}
+
+function zoneForFeet(feet) {
+  if (feet == null || !Number.isFinite(feet)) {
+    return { key: "unknown", label: "—" };
+  }
+  if (feet < ZONES.safeMax) {
+    return { key: "safe", label: "Safe" };
+  }
+  if (feet < ZONES.warnMax) {
+    return { key: "warn", label: "Warning" };
+  }
+  return { key: "crit", label: "Critical" };
 }
 
 function chartSeries() {
@@ -904,6 +933,170 @@ function renderTable() {
   $("nextPage").disabled = state.page >= pages;
 }
 
+function forecastSeries() {
+  const u = currentUnit();
+  const chrono = readingsChrono().filter((r) => elevationFeet(r) != null);
+  if (chrono.length < 2) {
+    return { observed: [], forecast: [], note: "Need more readings for forecast" };
+  }
+  const observed = chrono.map((r) => {
+    const ft = elevationFeet(r);
+    return {
+      x: Number(r.measurement_time) * 1000,
+      y: Number(u.fromFeet(ft).toFixed(Math.max(u.digits, 3)))
+    };
+  });
+  const windowPts = chrono.slice(-Math.min(12, chrono.length));
+  const first = windowPts[0];
+  const last = windowPts[windowPts.length - 1];
+  const dtH =
+    (Number(last.measurement_time) - Number(first.measurement_time)) / 3600;
+  const dFt = elevationFeet(last) - elevationFeet(first);
+  const rateFtPerH = dtH > 0.05 ? dFt / dtH : 0;
+  const lastFt = elevationFeet(last);
+  const lastT = Number(last.measurement_time) * 1000;
+  const horizonH = 24;
+  const steps = 8;
+  const forecast = [{ x: lastT, y: Number(u.fromFeet(lastFt).toFixed(u.digits + 1)) }];
+  for (let i = 1; i <= steps; i++) {
+    const h = (horizonH * i) / steps;
+    const ft = lastFt + rateFtPerH * h;
+    forecast.push({
+      x: lastT + h * 3600 * 1000,
+      y: Number(u.fromFeet(ft).toFixed(Math.max(u.digits, 3)))
+    });
+  }
+  const sign = rateFtPerH >= 0 ? "+" : "";
+  const note = `Trend ${sign}${formatFeetValue(rateFtPerH, { withUnit: true })}/h · 24h outlook`;
+  return { observed, forecast, note };
+}
+
+function renderForecastChart() {
+  const el = $("forecastChart");
+  if (!el || typeof ApexCharts === "undefined") return;
+  const u = currentUnit();
+  const { observed, forecast, note } = forecastSeries();
+  const noteEl = $("forecastNote");
+  if (noteEl) noteEl.textContent = note;
+  const height = Math.min(
+    Math.max(
+      Math.floor(
+        document.querySelector(".chart-host-md")?.getBoundingClientRect()
+          .height || 300
+      ),
+      260
+    ),
+    420
+  );
+  const annotations = {
+    yaxis: [
+      {
+        y: u.fromFeet(ZONES.safeMax),
+        borderColor: "#16a34a",
+        strokeDashArray: 4,
+        label: {
+          text: "Safe max",
+          style: { color: "#14532d", background: "#dcfce7", fontSize: "11px" }
+        }
+      },
+      {
+        y: u.fromFeet(ZONES.warnMax),
+        borderColor: "#d97706",
+        strokeDashArray: 4,
+        label: {
+          text: "Warning max",
+          style: { color: "#78350f", background: "#fef3c7", fontSize: "11px" }
+        }
+      },
+      {
+        y: u.fromFeet(ZONES.critMax),
+        borderColor: "#b91c1c",
+        strokeDashArray: 4,
+        label: {
+          text: "Critical max",
+          style: { color: "#7f1d1d", background: "#fee2e2", fontSize: "11px" }
+        }
+      }
+    ]
+  };
+  const options = {
+    chart: {
+      type: "line",
+      height,
+      fontFamily: "Poppins, sans-serif",
+      toolbar: { show: false },
+      zoom: { enabled: false },
+      parentHeightOffset: 0,
+      animations: { enabled: true, speed: 600 }
+    },
+    series: [
+      { name: "Observed", data: observed },
+      { name: "Forecast (24h)", data: forecast }
+    ],
+    stroke: {
+      curve: "smooth",
+      width: [2.5, 2],
+      dashArray: [0, 6]
+    },
+    colors: ["#004237", "#b45309"],
+    dataLabels: { enabled: false },
+    markers: { size: 0, hover: { size: 4 } },
+    grid: {
+      borderColor: "rgba(191,201,196,0.7)",
+      strokeDashArray: 3,
+      padding: { left: 8, right: 8, top: 12, bottom: 0 }
+    },
+    legend: {
+      position: "top",
+      horizontalAlign: "right",
+      fontSize: "12px",
+      fontWeight: 500
+    },
+    xaxis: {
+      type: "datetime",
+      labels: {
+        style: { colors: "#707975", fontSize: "11px", fontWeight: 500 },
+        datetimeUTC: false
+      },
+      axisBorder: { show: false },
+      axisTicks: { show: false }
+    },
+    yaxis: {
+      decimalsInFloat: u.digits,
+      labels: {
+        style: { colors: "#707975", fontSize: "11px", fontWeight: 500 },
+        formatter: (v) => `${formatNumber(v, u.digits)} ${u.label}`
+      }
+    },
+    tooltip: {
+      theme: "light",
+      x: { format: "dd MMM hh:mm TT" },
+      y: {
+        formatter: (v) =>
+          `${formatNumber(v, Math.max(u.digits, 3))} ${u.label}`
+      }
+    },
+    annotations
+  };
+
+  if (!state.forecastChart) {
+    state.forecastChart = new ApexCharts(el, options);
+    state.forecastChart.render();
+  } else {
+    state.forecastChart.updateOptions(
+      {
+        chart: { height },
+        series: options.series,
+        yaxis: options.yaxis,
+        tooltip: options.tooltip,
+        annotations
+      },
+      true,
+      true
+    );
+  }
+}
+
 function refreshViews() {
   state.readings = state.readings.map((row) => {
     const ft = elevationFeet(row, state.station);
@@ -915,6 +1108,7 @@ function refreshViews() {
     renderChart();
     renderRawChart();
     renderRainChart();
+    renderForecastChart();
   });
 }
 

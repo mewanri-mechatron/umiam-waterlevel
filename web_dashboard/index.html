@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Umiam Dam · Water Level</title>
-  <link rel="icon" type="image/png" href="favicon.png" />
-  <link rel="apple-touch-icon" href="favicon.png" />
+  <title>Water Level Monitoring System · MeECL</title>
+  <link rel="icon" type="image/png" href="img/mepgcl-logo.png" />
+  <link rel="apple-touch-icon" href="img/mepgcl-logo.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@400,0..1&display=block" rel="stylesheet" />
-  <link rel="stylesheet" href="css/styles.css?v=54" />
+  <link rel="stylesheet" href="css/styles.css?v=58" />
   <script src="https://cdn.jsdelivr.net/npm/apexcharts@4.5.0/dist/apexcharts.min.js"></script>
 </head>
 <body>
@@ -20,18 +20,22 @@
     <header class="topbar">
       <div class="topbar-inner">
         <div class="brand-block">
-          <div class="brand-mark" aria-hidden="true">
-            <span class="material-symbols-outlined">water_drop</span>
-          </div>
+          <img
+            class="brand-logo"
+            src="img/mepgcl-logo.png"
+            width="88"
+            height="70"
+            alt="MePGCL"
+          />
           <div>
             <div class="brand-title-row">
-              <h1>Umiam Dam</h1>
+              <h1>Water Level Monitoring System</h1>
               <span id="badgeLive" class="badge badge-success">
                 <span class="dot"></span> Live
               </span>
               <span id="badgeCondition" class="badge badge-muted">Normal</span>
             </div>
-            <p class="brand-sub">Meghalaya Reservoir · Stage - 1</p>
+            <p class="brand-sub">MeECL Reservoir Monitoring &amp; Early-Warning System</p>
           </div>
         </div>
 
@@ -229,6 +233,21 @@
         </article>
       </section>
 
+      <section class="forecast-row" aria-label="Trend and forecast">
+        <article class="chart-card">
+          <header class="card-head">
+            <div>
+              <h2>Trend &amp; Forecast</h2>
+              <p id="forecastSubtitle">Observed level + 24h projection from recent trend</p>
+            </div>
+            <span id="forecastNote" class="mono muted small">—</span>
+          </header>
+          <div class="chart-host chart-host-md">
+            <div id="forecastChart"></div>
+          </div>
+        </article>
+      </section>
+
       <section class="extra-charts" aria-label="Rainfall and raw level">
         <article class="chart-card">
           <header class="card-head">
@@ -254,11 +273,37 @@
         </article>
       </section>
     </main>
+
+    <footer class="site-footer">
+      <div class="site-footer-inner">
+        <div class="footer-top">
+          <div class="footer-brand">
+            <img src="img/mepgcl-logo.png" width="64" height="51" alt="MePGCL" />
+            <div>
+              <p class="footer-title">Water Level Monitoring System</p>
+              <p class="footer-org">Meghalaya Energy Corporation Limited</p>
+              <p class="footer-sub">A Government of Meghalaya Undertaking</p>
+            </div>
+          </div>
+          <div class="footer-aside">
+            <p class="footer-version">version 1.2.0</p>
+            <a class="footer-link" href="mailto:support@meecl.in">support@meecl.in</a>
+            <a class="footer-link" href="tel:+913642222222">+91 364 222 2222</a>
+          </div>
+        </div>
+        <div class="footer-bottom">
+          <p class="footer-copy">
+            © 2026 Meghalaya Energy Corporation Limited. All rights reserved.
+          </p>
+          <p class="footer-powered">Powered by Mechatron Private Limited.</p>
+        </div>
+      </div>
+    </footer>
   </div>
 
-  <script src="js/firebase-config.js?v=52"></script>
-  <script src="js/demo-data.js?v=52"></script>
-  <script type="module" src="js/firebase.js?v=52"></script>
-  <script type="module" src="js/app.js?v=54"></script>
+  <script src="js/firebase-config.js?v=58"></script>
+  <script src="js/demo-data.js?v=58"></script>
+  <script type="module" src="js/firebase.js?v=58"></script>
+  <script type="module" src="js/app.js?v=58"></script>
 </body>
 </html>

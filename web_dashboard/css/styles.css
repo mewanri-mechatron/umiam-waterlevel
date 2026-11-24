@@ -15,6 +15,9 @@
   --success-ink: #14532d;
   --warn: #b45309;
   --warn-bg: #fef3c7;
+  --danger: #b91c1c;
+  --danger-bg: #fee2e2;
+  --danger-ink: #7f1d1d;
   --font: "Poppins", system-ui, sans-serif;
   --radius: 12px;
   --radius-lg: 16px;
@@ -66,20 +69,19 @@ body { overflow-x: hidden; }
   gap: 16px;
 }
 
-.brand-block { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-block { display: flex; align-items: center; gap: 14px; min-width: 0; }
 
-.brand-mark {
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-  background: var(--teal);
-  color: #fff;
-  display: grid;
-  place-items: center;
+.brand-logo {
+  width: 88px;
+  height: auto;
+  max-height: 70px;
+  object-fit: contain;
   flex-shrink: 0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 4px;
+  border: 1px solid var(--outline);
 }
-
-.brand-mark .material-symbols-outlined { font-size: 22px; font-variation-settings: "FILL" 1; }
 
 .brand-title-row {
   display: flex;
@@ -90,7 +92,7 @@ body { overflow-x: hidden; }
 
 .brand-title-row h1 {
   margin: 0;
-  font-size: clamp(20px, 3vw, 28px);
+  font-size: clamp(18px, 2.6vw, 26px);
   font-weight: 600;
   letter-spacing: -0.4px;
   line-height: 1.15;
@@ -98,8 +100,9 @@ body { overflow-x: hidden; }
 
 .brand-sub {
   margin: 4px 0 0;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--muted);
+  max-width: 42rem;
 }
 
 .badge {
@@ -125,6 +128,7 @@ body { overflow-x: hidden; }
 .badge-success .dot { background: var(--success); }
 .badge-muted { background: #cce5dd; color: #506761; }
 .badge-warn { background: var(--warn-bg); color: #78350f; }
+.badge-danger { background: var(--danger-bg); color: var(--danger-ink); }
 
 .topbar-actions {
   display: flex;
@@ -315,6 +319,131 @@ body { overflow-x: hidden; }
   border: 1px solid var(--outline);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
+}
+
+.forecast-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+}
+
+.chart-host-md {
+  min-height: 300px;
+  height: 320px;
+}
+
+.site-footer {
+  margin-top: auto;
+  background: #0f2924;
+  color: #d7e5df;
+}
+
+.site-footer-inner {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 36px 28px 28px;
+}
+
+.footer-top {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px 40px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid rgba(215, 229, 223, 0.16);
+}
+
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.footer-brand img {
+  width: 64px;
+  height: auto;
+  object-fit: contain;
+  background: #fff;
+  border-radius: 8px;
+  padding: 4px;
+  flex-shrink: 0;
+}
+
+.footer-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: -0.2px;
+}
+
+.footer-org {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #c5d8d0;
+}
+
+.footer-sub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: #8faba1;
+}
+
+.footer-aside {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  text-align: right;
+}
+
+.footer-version {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8faba1;
+}
+
+.footer-link {
+  color: #b7d4c8;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.footer-link:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
+.footer-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px 24px;
+  padding-top: 18px;
+}
+
+.footer-copy {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: #8faba1;
+  line-height: 1.45;
+}
+
+.footer-powered {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #91cfbe;
 }
 
 .diag-card {
@@ -637,9 +766,21 @@ tbody tr:hover { background: var(--panel-soft); }
     min-height: 360px;
   }
   .topbar-inner,
-  .main {
+  .main,
+  .site-footer-inner {
     padding-left: 16px;
     padding-right: 16px;
+  }
+  .brand-logo {
+    width: 68px;
+  }
+  .footer-aside {
+    align-items: flex-start;
+    text-align: left;
+  }
+  .footer-bottom {
+    flex-direction: column;
+    align-items: flex-start;
   }
   .hero-top {
     flex-direction: column;
