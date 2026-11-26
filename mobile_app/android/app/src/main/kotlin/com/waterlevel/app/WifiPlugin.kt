@@ -17,6 +17,7 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
 
 /**
  * Registers on every FlutterEngine (UI + WorkManager background), so SoftAP /
@@ -28,6 +29,7 @@ class WifiPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.
     private var events: EventChannel.EventSink? = null
     private var appContext: Context? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val worker = Executors.newSingleThreadExecutor()
 
     /** Must be retained — Android drops SoftAP if the callback is GC'd. */
     private var gatewayCallback: ConnectivityManager.NetworkCallback? = null
@@ -99,33 +101,88 @@ class WifiPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, EventChannel.
             "hasValidatedInternet" -> result.success(NetworkBinder.hasValidatedInternet(context))
             "isWifiEnabled" -> result.success(isWifiEnabled(context))
             "ensureWifiEnabled" -> result.success(ensureWifiEnabled(context))
-            "pauseWifiForCloudUpload" -> result.success(pauseWifiForCloudUpload(context))
+            // Blocks for several seconds (network request + settle) — never on
+            // the main thread, or Android shows "App not responding".
+            "pauseWifiForCloudUpload" -> worker.execute {
+                val ok = pauseWifiForCloudUpload(context)
+                mainHandler.post { result.success(ok) }
+            }
             "resumeWifiAfterCloudUpload" -> result.success(resumeWifiAfterCloudUpload(context))
+            "syncLeaseAcquire" -> {
+                val owner = args?.get("owner") as? String ?: "unknown"
+                val ttl = (args?.get("ttlMs") as? Number)?.toLong() ?: 120_000L
+                result.success(SyncLease.tryAcquire(owner, ttl))
+            }
+            "syncLeaseRelease" -> {
+                SyncLease.release(args?.get("owner") as? String ?: "unknown")
+                result.success(null)
+            }
+            "syncLeaseHolder" -> result.success(SyncLease.holder())
+            "deviceInfo" -> worker.execute {
+                val info = try {
+                    DeviceInfo.snapshot(context) + mapOf("service_running" to SiteSyncService.isRunning)
+                } catch (_: Throwable) {
+                    emptyMap()
+                }
+                mainHandler.post { result.success(info) }
+            }
+            "setDeviceName" -> {
+                DeviceInfo.setDeviceName(context, args?.get("name") as? String ?: "")
+                result.success(DeviceInfo.deviceName(context))
+            }
+            "openPhoneSettings" -> result.success(
+                DeviceInfo.openSettings(context, args?.get("which") as? String ?: "app"),
+            )
+            "cloudReport" -> {
+                val force = args?.get("force") as? Boolean ?: false
+                worker.execute { CloudReporter.report(context, force) }
+                result.success(null)
+            }
+            "markWorkerPullDone" -> {
+                SyncLease.markWorkerPullDone()
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
     }
 
-    /** Briefly drop SoftAP so LTE can upload; caller should resume afterward. */
+    /**
+     * Free a cloud path without powering WiFi off:
+     * 1) bind to LTE while SoftAP stays up
+     * 2) if that fails, soft-disconnect SoftAP only (radio stays on)
+     */
     private fun pauseWifiForCloudUpload(context: Context): Boolean {
         return try {
-            NetworkBinder.clearBinding(context)
-            val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            @Suppress("DEPRECATION")
-            if (!wifi.isWifiEnabled) return true
-            @Suppress("DEPRECATION")
-            wifi.setWifiEnabled(false)
+            releaseGatewayRequest()
+            if (NetworkBinder.requestAndBindCellular(context, 6_000L)) {
+                return true
+            }
+            NetworkBinder.softDisconnectWifi(context)
+            // Brief settle so cellular becomes routable.
+            try {
+                Thread.sleep(2_000)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            NetworkBinder.requestAndBindCellular(context, 6_000L) ||
+                NetworkBinder.hasValidatedInternet(context)
         } catch (_: Throwable) {
             false
         }
     }
 
     private fun resumeWifiAfterCloudUpload(context: Context): Boolean {
+        NetworkBinder.releaseCellularRequest(context)
         return try {
+            // Never leave the radio off if an older build disabled it.
+            NetworkBinder.ensureWifiRadioOn(context)
             val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             @Suppress("DEPRECATION")
-            if (wifi.isWifiEnabled) return true
-            @Suppress("DEPRECATION")
-            wifi.setWifiEnabled(true)
+            try {
+                wifi.reconnect()
+            } catch (_: Throwable) {
+            }
+            true
         } catch (_: Throwable) {
             false
         }

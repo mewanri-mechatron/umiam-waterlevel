@@ -7,13 +7,7 @@ class StationRepository {
 
   final AppDatabase _db;
 
-  Future<Station> getDefaultStation() async {
-    final station = await _db.getStation(AppConstants.defaultStationId);
-    if (station == null) {
-      throw StateError('Default station missing from database');
-    }
-    return station;
-  }
+  Future<Station> getDefaultStation() => _db.ensureDefaultStation();
 
   /// Save gauge calibration: actual water level + sensor snapshot.
   Future<void> updateCalibration({

@@ -2,12 +2,14 @@ package com.waterlevel.app
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.net.Network
 import android.util.Log
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import kotlin.math.roundToInt
 
 /**
@@ -18,14 +20,39 @@ import kotlin.math.roundToInt
 object NativeCloudUploader {
     private const val TAG = "NativeCloudUploader"
     private const val API_KEY = "AIzaSyBHAQdfBcowfRfcEga0eqC95ADL-9KXtYM"
-    private const val DB_URL =
+    internal const val DB_URL =
         "https://umiam-waterlevel-default-rtdb.asia-southeast1.firebasedatabase.app"
-    private const val STATION_ID = "station_001"
+    internal const val STATION_ID = "station_001"
     // Chunk size keeps each RTDB PATCH under practical size/timeout limits.
     private const val BATCH = 100
+    private const val AUTH_PREFS = "native_cloud_auth"
+    private const val KEY_ID_TOKEN = "id_token"
+    private const val KEY_REFRESH_TOKEN = "refresh_token"
+    private const val KEY_EXPIRES_AT = "expires_at_ms"
+    /** Refresh a few minutes early so a token never expires mid-upload. */
+    private const val TOKEN_SKEW_MS = 5 * 60_000L
 
     data class Result(val uploaded: Int, val pendingLeft: Int, val message: String)
 
+    internal class HttpResult(val code: Int, val body: String?)
+
+    private class AuthExpired : Exception("auth token rejected")
+
+    /** Pending row count, or -1 if the database could not be read. */
+    fun pendingCount(context: Context): Int {
+        val dbFile = context.getDatabasePath("water_level.db")
+        if (!dbFile.exists()) return 0
+        return try {
+            SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY).use {
+                countPending(it)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "pending count failed", t)
+            -1
+        }
+    }
+
+    @Synchronized
     fun uploadPending(context: Context): Result {
         NetworkBinder.bindToInternet(context)
         val dbFile = context.getDatabasePath("water_level.db")
@@ -33,34 +60,44 @@ object NativeCloudUploader {
             return Result(0, 0, "No local database yet")
         }
 
-        val db = SQLiteDatabase.openDatabase(
-            dbFile.path,
-            null,
-            SQLiteDatabase.OPEN_READWRITE,
-        )
+        val db = try {
+            SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READWRITE)
+        } catch (t: Throwable) {
+            Log.e(TAG, "cannot open database", t)
+            return Result(0, -1, "Database busy")
+        }
         try {
             val pending = countPending(db)
             if (pending == 0) {
                 return Result(0, 0, "Nothing pending")
             }
-            val token = signInAnonymously()
-                ?: return Result(0, pending, "Anonymous auth failed")
+            val network = NetworkBinder.internetNetwork(context)
+            var token = idToken(context, network, forceRefresh = false)
+                ?: return Result(0, pending, "Cloud sign-in failed (will retry)")
 
             val station = readStation(db)
+            var cloudLatest = fetchCloudLatest(network, token)
             var uploaded = 0
             var rounds = 0
             while (rounds < 200) {
                 rounds += 1
                 val batch = readPending(db, BATCH)
                 if (batch.isEmpty()) break
-                val ok = pushBatch(token, station, batch)
-                if (!ok) {
+                val ok = try {
+                    pushBatch(network, token, station, batch, cloudLatest)
+                } catch (_: AuthExpired) {
+                    token = idToken(context, network, forceRefresh = true)
+                        ?: return Result(uploaded, countPending(db), "Cloud sign-in expired")
+                    pushBatch(network, token, station, batch, cloudLatest)
+                }
+                if (ok == null) {
                     return Result(
                         uploaded,
                         countPending(db),
                         "RTDB write failed after $uploaded uploaded",
                     )
                 }
+                cloudLatest = ok
                 markUploaded(db, batch)
                 uploaded += batch.size
             }
@@ -71,7 +108,10 @@ object NativeCloudUploader {
             Log.e(TAG, "native upload error", t)
             return Result(0, -1, t.message ?: "upload error")
         } finally {
-            db.close()
+            try {
+                db.close()
+            } catch (_: Throwable) {
+            }
         }
     }
 
@@ -183,11 +223,27 @@ object NativeCloudUploader {
         }
     }
 
+    /** Current `water/latest` node so a backlog upload never moves it backwards. */
+    private fun fetchCloudLatest(network: Network?, token: String): JSONObject? {
+        return try {
+            val res = http(network, "GET", "$DB_URL/water/latest/$STATION_ID.json?auth=$token", null)
+            if (res.code !in 200..299) return null
+            val body = res.body?.trim()
+            if (body.isNullOrEmpty() || body == "null") null else JSONObject(body)
+        } catch (t: Throwable) {
+            Log.w(TAG, "latest fetch skipped", t)
+            null
+        }
+    }
+
+    /** Returns the newest reading now in the cloud, or null if the write failed. */
     private fun pushBatch(
+        network: Network?,
         token: String,
         station: JSONObject,
         batch: List<JSONObject>,
-    ): Boolean {
+        cloudLatest: JSONObject?,
+    ): JSONObject? {
         val updates = JSONObject()
         var newest: JSONObject? = null
         val actual = if (station.has("calib_actual_mm")) station.getInt("calib_actual_mm") else null
@@ -213,32 +269,20 @@ object NativeCloudUploader {
             updates.put("water/readings/$STATION_ID/$key", clean)
             newest = newer(newest, clean)
         }
-        if (newest != null) {
+        val latestAfter = if (newest == null) cloudLatest else newer(cloudLatest, newest)
+        if (newest != null && latestAfter === newest) {
             updates.put("water/latest/$STATION_ID", newest)
         }
         station.put("last_updated", System.currentTimeMillis() / 1000)
         updates.put("water/stations/$STATION_ID", station)
 
-        val url = URL("$DB_URL/.json?auth=$token")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "PATCH"
-            connectTimeout = 20000
-            readTimeout = 30000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
+        val res = http(network, "PATCH", "$DB_URL/.json?auth=$token", updates.toString())
+        if (res.code == 401 || res.code == 403) throw AuthExpired()
+        if (res.code !in 200..299) {
+            Log.e(TAG, "RTDB PATCH HTTP ${res.code} ${res.body}")
+            return null
         }
-        try {
-            OutputStreamWriter(conn.outputStream).use { it.write(updates.toString()) }
-            val code = conn.responseCode
-            if (code !in 200..299) {
-                val err = (conn.errorStream ?: conn.inputStream)?.bufferedReader()?.use(BufferedReader::readText)
-                Log.e(TAG, "RTDB PATCH HTTP $code $err")
-                return false
-            }
-            return true
-        } finally {
-            conn.disconnect()
-        }
+        return latestAfter
     }
 
     private fun newer(a: JSONObject?, b: JSONObject): JSONObject {
@@ -256,29 +300,115 @@ object NativeCloudUploader {
         return (mm / 1000.0 * 100.0).roundToInt() / 100.0
     }
 
-    private fun signInAnonymously(): String? {
-        val url = URL(
-            "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=$API_KEY",
-        )
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15000
-            readTimeout = 15000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
+    /**
+     * Cached anonymous identity. Creating a new anonymous user on every cycle
+     * hits Firebase's sign-up quota within hours and silently stops uploads.
+     */
+    @Synchronized
+    internal fun idToken(context: Context, network: Network?, forceRefresh: Boolean): String? {
+        val prefs = context.getSharedPreferences(AUTH_PREFS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val cached = prefs.getString(KEY_ID_TOKEN, null)
+        val expiresAt = prefs.getLong(KEY_EXPIRES_AT, 0L)
+        if (!forceRefresh && cached != null && now < expiresAt - TOKEN_SKEW_MS) {
+            return cached
         }
-        try {
-            OutputStreamWriter(conn.outputStream).use {
-                it.write("""{"returnSecureToken":true}""")
-            }
-            val code = conn.responseCode
-            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
-                ?.bufferedReader()?.use(BufferedReader::readText)
-            if (code !in 200..299) {
-                Log.e(TAG, "auth HTTP $code $body")
+
+        val refresh = prefs.getString(KEY_REFRESH_TOKEN, null)
+        if (refresh != null) {
+            val res = try {
+                http(
+                    network,
+                    "POST",
+                    "https://securetoken.googleapis.com/v1/token?key=$API_KEY",
+                    "grant_type=refresh_token&refresh_token=" + URLEncoder.encode(refresh, "UTF-8"),
+                    contentType = "application/x-www-form-urlencoded",
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "token refresh network error", t)
                 return null
             }
-            return JSONObject(body ?: "{}").optString("idToken").ifBlank { null }
+            if (res.code in 200..299) {
+                val json = JSONObject(res.body ?: "{}")
+                val id = json.optString("id_token").ifBlank { null }
+                if (id != null) {
+                    saveTokens(
+                        prefs,
+                        id,
+                        json.optString("refresh_token").ifBlank { refresh },
+                        json.optString("expires_in", "3600"),
+                    )
+                    return id
+                }
+            }
+            // Only a definitive rejection discards the identity; transient
+            // failures keep it so we never mint a new anonymous user needlessly.
+            if (res.code != 400) {
+                Log.w(TAG, "token refresh HTTP ${res.code}")
+                return null
+            }
+            Log.w(TAG, "refresh token rejected — signing up again: ${res.body}")
+        }
+
+        val res = try {
+            http(
+                network,
+                "POST",
+                "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=$API_KEY",
+                """{"returnSecureToken":true}""",
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "sign-up network error", t)
+            return null
+        }
+        if (res.code !in 200..299) {
+            Log.e(TAG, "auth HTTP ${res.code} ${res.body}")
+            return null
+        }
+        val json = JSONObject(res.body ?: "{}")
+        val id = json.optString("idToken").ifBlank { null } ?: return null
+        val newRefresh = json.optString("refreshToken").ifBlank { null } ?: return id
+        saveTokens(prefs, id, newRefresh, json.optString("expiresIn", "3600"))
+        return id
+    }
+
+    private fun saveTokens(
+        prefs: android.content.SharedPreferences,
+        idToken: String,
+        refreshToken: String,
+        expiresInSeconds: String,
+    ) {
+        val ttlMs = (expiresInSeconds.toLongOrNull() ?: 3600L) * 1000L
+        prefs.edit()
+            .putString(KEY_ID_TOKEN, idToken)
+            .putString(KEY_REFRESH_TOKEN, refreshToken)
+            .putLong(KEY_EXPIRES_AT, System.currentTimeMillis() + ttlMs)
+            .apply()
+    }
+
+    internal fun http(
+        network: Network?,
+        method: String,
+        url: String,
+        body: String?,
+        contentType: String = "application/json",
+    ): HttpResult {
+        val target = URL(url)
+        val raw = network?.openConnection(target) ?: target.openConnection()
+        val conn = raw as HttpURLConnection
+        try {
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 30_000
+            conn.requestMethod = method
+            if (body != null) {
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", contentType)
+                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body) }
+            }
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.use(BufferedReader::readText)
+            return HttpResult(code, text)
         } finally {
             conn.disconnect()
         }

@@ -58,7 +58,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final stationAsync = ref.watch(stationProvider);
     final useMock = ref.watch(useMockGatewayProvider);
     final dash = ref.watch(dashboardDataProvider);
-    final latestInterval = dash.asData?.value.latest?.sendIntervalSeconds;
+    final latestInterval = dash.valueOrNull?.latest?.sendIntervalSeconds;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
@@ -153,8 +153,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                       _intervalController.text.trim(),
                                     );
                                     if (v == null || v < 10 || v > 3600) {
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
                                         const SnackBar(
                                           content: Text(
                                             'Enter 10–3600 seconds',

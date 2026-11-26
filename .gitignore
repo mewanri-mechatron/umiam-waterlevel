@@ -35,5 +35,14 @@ mobile_app/*.iml
 mobile_app/coverage/
 
 # Firebase CLI local
+.firebase/
 firebase/.firebase/
 *.log
+
+# Release signing (keep local only)
+mobile_app/android/key.properties
+mobile_app/android/*.jks
+mobile_app/android/*.keystore
+
+# Built APK copies (regenerate with flutter build apk --release)
+share/*.apk

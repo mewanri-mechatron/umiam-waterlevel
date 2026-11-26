@@ -8,6 +8,7 @@ class SyncState {
     this.lastGatewayContact,
     this.uploadedCount = 0,
     this.failedUploadCount = 0,
+    this.lastEspAckId = 0,
   });
 
   final int? id;
@@ -19,6 +20,9 @@ class SyncState {
   final int uploadedCount;
   final int failedUploadCount;
 
+  /// Highest Node B queue id we have told the ESP it may delete.
+  final int lastEspAckId;
+
   SyncState copyWith({
     int? lastDownloadTime,
     int? lastUploadTime,
@@ -26,6 +30,7 @@ class SyncState {
     int? lastGatewayContact,
     int? uploadedCount,
     int? failedUploadCount,
+    int? lastEspAckId,
   }) {
     return SyncState(
       id: id,
@@ -36,6 +41,7 @@ class SyncState {
       lastGatewayContact: lastGatewayContact ?? this.lastGatewayContact,
       uploadedCount: uploadedCount ?? this.uploadedCount,
       failedUploadCount: failedUploadCount ?? this.failedUploadCount,
+      lastEspAckId: lastEspAckId ?? this.lastEspAckId,
     );
   }
 
@@ -48,6 +54,7 @@ class SyncState {
         'last_gateway_contact': lastGatewayContact,
         'uploaded_count': uploadedCount,
         'failed_upload_count': failedUploadCount,
+        'last_esp_ack_id': lastEspAckId,
       };
 
   factory SyncState.fromMap(Map<String, Object?> map) => SyncState(
@@ -59,5 +66,6 @@ class SyncState {
         lastGatewayContact: map['last_gateway_contact'] as int?,
         uploadedCount: map['uploaded_count'] as int? ?? 0,
         failedUploadCount: map['failed_upload_count'] as int? ?? 0,
+        lastEspAckId: map['last_esp_ack_id'] as int? ?? 0,
       );
 }

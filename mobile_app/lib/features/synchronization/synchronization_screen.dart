@@ -19,8 +19,9 @@ class _SynchronizationScreenState extends ConsumerState<SynchronizationScreen> {
 
   String _fmt(int? epoch) {
     if (epoch == null) return 'Never';
-    return DateFormat('yyyy-MM-dd HH:mm:ss')
-        .format(DateTime.fromMillisecondsSinceEpoch(epoch * 1000));
+    return DateFormat(
+      'yyyy-MM-dd HH:mm:ss',
+    ).format(DateTime.fromMillisecondsSinceEpoch(epoch * 1000));
   }
 
   @override
@@ -44,7 +45,10 @@ class _SynchronizationScreenState extends ConsumerState<SynchronizationScreen> {
                   children: [
                     const Text(
                       'Cloud upload status',
-                      style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 16,
+                      ),
                     ),
                     const SizedBox(height: 12),
                     Wrap(
@@ -69,10 +73,22 @@ class _SynchronizationScreenState extends ConsumerState<SynchronizationScreen> {
                     ),
                     const SizedBox(height: 16),
                     _row('Pending upload count', '${data.pendingCount}'),
-                    _row('Successfully uploaded', '${data.syncState.uploadedCount}'),
-                    _row('Failed uploads', '${data.syncState.failedUploadCount}'),
-                    _row('Last successful upload', _fmt(data.syncState.lastUploadTime)),
-                    _row('Last gateway contact', _fmt(data.syncState.lastGatewayContact)),
+                    _row(
+                      'Successfully uploaded',
+                      '${data.syncState.uploadedCount}',
+                    ),
+                    _row(
+                      'Failed uploads',
+                      '${data.syncState.failedUploadCount}',
+                    ),
+                    _row(
+                      'Last successful upload',
+                      _fmt(data.syncState.lastUploadTime),
+                    ),
+                    _row(
+                      'Last gateway contact',
+                      _fmt(data.syncState.lastGatewayContact),
+                    ),
                     if (_message != null) ...[
                       const SizedBox(height: 12),
                       Text(_message!),
@@ -95,7 +111,8 @@ class _SynchronizationScreenState extends ConsumerState<SynchronizationScreen> {
                             .read(syncServiceProvider)
                             .uploadPendingToFirebase();
                         setState(() {
-                          _message = result.message ??
+                          _message =
+                              result.message ??
                               'Uploaded ${result.uploaded}. Pending ${result.pendingRemaining}.';
                         });
                         ref.invalidate(dashboardDataProvider);

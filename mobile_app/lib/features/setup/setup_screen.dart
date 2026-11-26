@@ -5,7 +5,9 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../../app/providers.dart';
 import '../../app/theme.dart';
+import '../../widgets/meecl_branding.dart';
 import '../../core/utils/water_level_math.dart';
+import '../../services/network_service.dart';
 import '../../widgets/unit_picker.dart';
 
 /// Set the real gauge reading once — saved to phone + cloud for all phones.
@@ -40,7 +42,9 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
     final known = double.tryParse(_actualLevel.text.trim());
     if (known == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter the real water level, e.g. 3201.90')),
+        const SnackBar(
+          content: Text('Enter the real water level, e.g. 3201.90'),
+        ),
       );
       return;
     }
@@ -62,7 +66,9 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
 
     setState(() => _busy = true);
     try {
-      await ref.read(stationRepositoryProvider).updateCalibration(
+      await ref
+          .read(stationRepositoryProvider)
+          .updateCalibration(
             actualMm: snap.actualMm,
             rawLevelMm: snap.rawLevelMm,
             distanceMm: snap.distanceMm,
@@ -80,7 +86,7 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Saved ${known.toStringAsFixed(2)} ft and shared to cloud.',
+            'Saved ${known.toStringAsFixed(2)} ft and shared to the cloud.',
           ),
         ),
       );
@@ -93,7 +99,7 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
   Widget build(BuildContext context) {
     final dash = ref.watch(dashboardDataProvider);
     final unit = ref.watch(displayLengthUnitProvider);
-    final data = dash.asData?.value;
+    final data = dash.valueOrNull;
     final station = data?.station;
     final latest = data?.latest;
     final distMm = latest?.distanceMm;
@@ -108,149 +114,286 @@ class _SetupScreenState extends ConsumerState<SetupScreen> {
       backgroundColor: AppColors.mist,
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 32),
+          padding: const EdgeInsets.only(top: 14),
           children: [
-            Text(
-              'Setup',
-              style: GoogleFonts.poppins(
-                fontSize: 22,
-                fontWeight: FontWeight.w600,
-                letterSpacing: -0.4,
-              ),
-            ),
-            Text(
-              'Calibration in feet AMSL · shared to all phones',
-              style: GoogleFonts.poppins(
-                color: AppColors.muted,
-                fontWeight: FontWeight.w500,
-                fontSize: 12,
-              ),
-            ),
-            const SizedBox(height: 12),
-            _Card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Display units',
-                    style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 8),
-                  const UnitPicker(dense: true),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            _Card(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Real water level',
-                    style: GoogleFonts.poppins(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 16,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Level (ft) = your number + change in sensor gap.',
-                    style: GoogleFonts.poppins(
-                      fontSize: 12,
-                      color: AppColors.muted,
-                      fontWeight: FontWeight.w500,
-                      height: 1.35,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  _InfoRow(
-                    label: 'Current raw level',
-                    value: formatDistanceMeters(distMm, unit: unit),
-                    warn: !hasGap,
-                  ),
-                  if (station?.hasCalibration == true) ...[
-                    const SizedBox(height: 8),
-                    _InfoRow(
-                      label: 'Saved level',
-                      value: formatLevelMeters(
-                        station!.calibActualMm,
-                        unit: unit,
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: _actualLevel,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: 'Real water level now',
-                      hintText: '3201.90',
-                      suffixText: 'ft',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  FilledButton(
-                    onPressed: _busy || !hasGap
-                        ? null
-                        : () => _saveCalibration(
-                              rawLevelMm: rawMm,
-                              distanceMm: distMm,
-                            ),
-                    child: Text(_busy ? 'Saving…' : 'Save level'),
-                  ),
-                  if (!hasGap) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      'Connect to the sensor on Level first to capture raw gap.',
-                      style: GoogleFonts.poppins(
-                        fontSize: 12,
-                        color: AppColors.warn,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(height: 18),
-            Text(
-              'More',
-              style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w600,
-                fontSize: 13,
-                color: AppColors.muted,
-              ),
-            ),
-            const SizedBox(height: 8),
-            _LinkTile(
-              icon: Icons.receipt_long_outlined,
-              title: 'Activity log',
-              subtitle: 'Sync and error history',
-              onTap: () => context.push('/audit'),
-            ),
-            _LinkTile(
-              icon: Icons.timer_outlined,
-              title: 'Sensor interval',
-              subtitle: 'How often Node B records',
-              onTap: () => context.push('/advanced'),
-            ),
-            if (dash.hasError) ...[
-              const SizedBox(height: 12),
-              Text(
-                'Local data load issue: ${dash.error}',
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                'Setup',
                 style: GoogleFonts.poppins(
-                  color: AppColors.danger,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: -0.4,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                'Calibration in feet AMSL · shared to all phones',
+                style: GoogleFonts.poppins(
+                  color: AppColors.muted,
+                  fontWeight: FontWeight.w500,
                   fontSize: 12,
                 ),
               ),
-            ],
+            ),
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _Card(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Display units',
+                          style: GoogleFonts.poppins(
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const UnitPicker(dense: true),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const _ThisPhoneCard(),
+                  const SizedBox(height: 12),
+                  _Card(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Real water level',
+                          style: GoogleFonts.poppins(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Level (ft) = your number + change in sensor gap.',
+                          style: GoogleFonts.poppins(
+                            fontSize: 12,
+                            color: AppColors.muted,
+                            fontWeight: FontWeight.w500,
+                            height: 1.35,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        _InfoRow(
+                          label: 'Current raw level',
+                          value: formatDistanceMeters(distMm, unit: unit),
+                          warn: !hasGap,
+                        ),
+                        if (station?.hasCalibration == true) ...[
+                          const SizedBox(height: 8),
+                          _InfoRow(
+                            label: 'Saved level',
+                            value: formatLevelMeters(
+                              station!.calibActualMm,
+                              unit: unit,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 14),
+                        TextField(
+                          controller: _actualLevel,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: 'Real water level now',
+                            hintText: '3201.90',
+                            suffixText: 'ft',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        FilledButton(
+                          onPressed: _busy || !hasGap
+                              ? null
+                              : () => _saveCalibration(
+                                  rawLevelMm: rawMm,
+                                  distanceMm: distMm,
+                                ),
+                          child: Text(_busy ? 'Saving…' : 'Save level'),
+                        ),
+                        if (!hasGap) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'Connect to the sensor on Level first to capture raw gap.',
+                            style: GoogleFonts.poppins(
+                              fontSize: 12,
+                              color: AppColors.warn,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    'More',
+                    style: GoogleFonts.poppins(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  _LinkTile(
+                    icon: Icons.receipt_long_outlined,
+                    title: 'Activity log',
+                    subtitle: 'This phone and other phones’ cloud logs',
+                    onTap: () => context.push('/audit'),
+                  ),
+                  _LinkTile(
+                    icon: Icons.timer_outlined,
+                    title: 'Sensor interval',
+                    subtitle: 'How often Node B records',
+                    onTap: () => context.push('/advanced'),
+                  ),
+                  if (dash.hasError) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Local data load issue: ${dash.error}',
+                      style: GoogleFonts.poppins(
+                        color: AppColors.danger,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            const MeeclSiteFooter(),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Name stored with this phone's cloud status and logs.
+class _ThisPhoneCard extends ConsumerStatefulWidget {
+  const _ThisPhoneCard();
+
+  @override
+  ConsumerState<_ThisPhoneCard> createState() => _ThisPhoneCardState();
+}
+
+class _ThisPhoneCardState extends ConsumerState<_ThisPhoneCard> {
+  final _name = TextEditingController();
+  PhoneStatus? _phone;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final status = await ref.read(networkServiceProvider).phoneStatus();
+    if (!mounted || status == null) return;
+    setState(() {
+      _phone = status;
+      if (_name.text.isEmpty) _name.text = status.name;
+    });
+  }
+
+  Future<void> _save() async {
+    final name = _name.text.trim();
+    if (name.isEmpty) return;
+    FocusScope.of(context).unfocus();
+    setState(() => _saving = true);
+    try {
+      final network = ref.read(networkServiceProvider);
+      final saved = await network.setPhoneName(name);
+      await ref
+          .read(auditLogServiceProvider)
+          .info('Phone name set to "${saved ?? name}"', category: 'app');
+      await network.requestCloudReport(force: true);
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Phone name saved')));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = _phone;
+    return _Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'This phone',
+            style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'This name appears with this phone’s status and logs in the cloud.',
+            style: GoogleFonts.poppins(
+              fontSize: 12,
+              color: AppColors.muted,
+              fontWeight: FontWeight.w500,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _name,
+            maxLength: 40,
+            textCapitalization: TextCapitalization.words,
+            decoration: InputDecoration(
+              labelText: 'Phone name',
+              hintText: 'e.g. Umiam guard phone 1',
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            onSubmitted: (_) => _save(),
+          ),
+          const SizedBox(height: 6),
+          FilledButton(
+            onPressed: _saving || p == null ? null : _save,
+            child: Text(_saving ? 'Saving…' : 'Save name'),
+          ),
+          if (p != null) ...[
+            const SizedBox(height: 12),
+            _InfoRow(label: 'Phone ID', value: p.deviceId),
+            const SizedBox(height: 8),
+            _InfoRow(
+              label: 'Model · Android · app',
+              value: '${p.model} · ${p.android} · ${p.appVersion}',
+            ),
+            const SizedBox(height: 8),
+            _InfoRow(
+              label: 'Free storage',
+              value: p.freeStorageMb < 0 ? '—' : '${p.freeStorageMb} MB',
+              warn: p.storageLow,
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -276,11 +419,7 @@ class _Card extends StatelessWidget {
 }
 
 class _InfoRow extends StatelessWidget {
-  const _InfoRow({
-    required this.label,
-    required this.value,
-    this.warn = false,
-  });
+  const _InfoRow({required this.label, required this.value, this.warn = false});
 
   final String label;
   final String value;

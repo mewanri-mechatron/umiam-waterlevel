@@ -12,7 +12,7 @@ class WaterLevelApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp.router(
-      title: 'WaterLevel',
+      title: 'Water Level Monitoring System',
       theme: buildAppTheme(),
       routerConfig: _router,
       debugShowCheckedModeBanner: false,

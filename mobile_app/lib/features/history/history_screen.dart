@@ -10,6 +10,7 @@ import '../../core/utils/water_level_math.dart';
 import '../../models/reading.dart';
 import '../../models/station.dart';
 import '../../widgets/level_chart.dart';
+import '../../widgets/meecl_branding.dart';
 import '../../widgets/unit_picker.dart';
 
 /// Full reading list — water level + raw level, 12-hour times.
@@ -59,9 +60,10 @@ class HistoryScreen extends ConsumerWidget {
                   IconButton(
                     tooltip: 'Copy CSV',
                     onPressed: () async {
-                      final readings =
-                          await ref.read(historyReadingsProvider.future);
-                      final station = stationAsync.asData?.value;
+                      final readings = await ref.read(
+                        historyReadingsProvider.future,
+                      );
+                      final station = stationAsync.valueOrNull;
                       final csv = _toCsv(
                         readings,
                         station: station,
@@ -131,8 +133,9 @@ class HistoryScreen extends ConsumerWidget {
                             final range = await showDateRangePicker(
                               context: context,
                               firstDate: DateTime(2020),
-                              lastDate:
-                                  DateTime.now().add(const Duration(days: 1)),
+                              lastDate: DateTime.now().add(
+                                const Duration(days: 1),
+                              ),
                             );
                             if (range != null) {
                               ref
@@ -169,48 +172,67 @@ class HistoryScreen extends ConsumerWidget {
                   ),
                 ),
                 data: (readings) {
-                  final station = stationAsync.asData?.value;
+                  final station = stationAsync.valueOrNull;
                   final chartRows = [...readings].reversed.toList();
+                  final footerIndex = readings.isEmpty
+                      ? 2
+                      : readings.length + 1;
                   return ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
-                    itemCount: readings.isEmpty ? 2 : readings.length + 1,
+                    padding: const EdgeInsets.only(top: 12),
+                    itemCount: footerIndex + 1,
                     itemBuilder: (context, index) {
                       if (index == 0) {
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '${readings.length} reading'
-                              '${readings.length == 1 ? '' : 's'}',
-                              style: GoogleFonts.poppins(
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.muted,
-                                fontSize: 12,
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${readings.length} reading'
+                                '${readings.length == 1 ? '' : 's'}',
+                                style: GoogleFonts.poppins(
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.muted,
+                                  fontSize: 12,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 8),
-                            Container(
-                              padding:
-                                  const EdgeInsets.fromLTRB(10, 10, 10, 6),
-                              decoration: BoxDecoration(
-                                color: AppColors.surface,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: AppColors.outline),
+                              const SizedBox(height: 8),
+                              Container(
+                                padding: const EdgeInsets.fromLTRB(
+                                  10,
+                                  10,
+                                  10,
+                                  6,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surface,
+                                  borderRadius: BorderRadius.circular(16),
+                                  border: Border.all(color: AppColors.outline),
+                                ),
+                                child: LevelChart(
+                                  readings: chartRows,
+                                  station: station,
+                                  unit: unit,
+                                  height: 150,
+                                ),
                               ),
-                              child: LevelChart(
-                                readings: chartRows,
-                                station: station,
-                                unit: unit,
-                                height: 150,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                          ],
+                              const SizedBox(height: 12),
+                            ],
+                          ),
+                        );
+                      }
+                      if (index == footerIndex) {
+                        return const Padding(
+                          padding: EdgeInsets.only(top: 16),
+                          child: MeeclSiteFooter(),
                         );
                       }
                       if (readings.isEmpty) {
                         return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 28),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 28,
+                          ),
                           child: Text(
                             'No readings here yet.\n'
                             'On Level: Connect to the sensor, or tap Sync.',
@@ -224,10 +246,13 @@ class HistoryScreen extends ConsumerWidget {
                         );
                       }
                       final r = readings[index - 1];
-                      return _ReadingRow(
-                        reading: r,
-                        station: station,
-                        unit: unit,
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: _ReadingRow(
+                          reading: r,
+                          station: station,
+                          unit: unit,
+                        ),
                       );
                     },
                   );
@@ -369,10 +394,7 @@ class _Metric extends StatelessWidget {
         ),
         Text(
           value,
-          style: GoogleFonts.poppins(
-            fontWeight: FontWeight.w600,
-            fontSize: 16,
-          ),
+          style: GoogleFonts.poppins(fontWeight: FontWeight.w600, fontSize: 16),
         ),
       ],
     );

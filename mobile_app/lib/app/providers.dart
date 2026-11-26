@@ -94,7 +94,6 @@ final syncServiceProvider = Provider<SyncService>((ref) {
 final auditLogServiceProvider = ChangeNotifierProvider<AuditLogService>((ref) {
   return AuditLogService(
     ref.watch(appDatabaseProvider),
-    firebase: ref.watch(firebaseServiceProvider),
     network: ref.watch(networkServiceProvider),
   );
 });
@@ -125,7 +124,10 @@ final readingRepositoryProvider = Provider<ReadingRepository>((ref) {
 });
 
 final stationProvider = FutureProvider<Station>((ref) async {
-  return ref.watch(stationRepositoryProvider).getDefaultStation();
+  return ref
+      .watch(stationRepositoryProvider)
+      .getDefaultStation()
+      .timeout(const Duration(seconds: 8));
 });
 
 final dashboardDataProvider =
@@ -140,6 +142,7 @@ class DashboardData {
     required this.recent,
     required this.syncState,
     required this.pendingCount,
+    required this.cloud,
     required this.hasInternet,
     required this.onGatewayWifi,
     required this.usingMockGateway,
@@ -150,24 +153,40 @@ class DashboardData {
   final List<Reading> recent;
   final SyncState syncState;
   final int pendingCount;
+  final CloudSyncInfo cloud;
   final bool hasInternet;
   final bool onGatewayWifi;
   final bool usingMockGateway;
 }
 
 class DashboardDataNotifier extends AsyncNotifier<DashboardData> {
+  /// Local SQLite reads are milliseconds; anything longer means the file is
+  /// locked — fail fast and keep showing the last good data.
+  static const _dbTimeout = Duration(seconds: 8);
+
+  /// Chart window; rows are newest-first from SQLite, capped for low-end phones.
+  static const _chartWindow = Duration(days: 7);
+  static const _chartRowCap = 2500;
+
   @override
   Future<DashboardData> build() => _load();
 
   Future<DashboardData> _load() async {
     final db = ref.read(appDatabaseProvider);
     final network = ref.read(networkServiceProvider);
-    final station =
-        await ref.read(stationRepositoryProvider).getDefaultStation();
-    final latest = await db.getLatestReading(station.id);
-    final recent = await db.getReadings(stationId: station.id, limit: 48);
-    final sync = await db.getSyncState(station.id);
-    final pending = await db.countPending(station.id);
+    final station = await ref
+        .read(stationRepositoryProvider)
+        .getDefaultStation()
+        .timeout(_dbTimeout);
+    final latest = await db.getLatestReading(station.id).timeout(_dbTimeout);
+    final from = DateTime.now().subtract(_chartWindow).millisecondsSinceEpoch ~/
+        1000;
+    final recent = await db
+        .getReadings(stationId: station.id, fromEpoch: from, limit: _chartRowCap)
+        .timeout(_dbTimeout);
+    final sync = await db.getSyncState(station.id).timeout(_dbTimeout);
+    final cloud = await db.getCloudSyncInfo(station.id).timeout(_dbTimeout);
+    final pending = cloud.pendingCount;
 
     // Peek only — never rebind SoftAP away during a dashboard reload.
     final online = await network.peekHasInternet().timeout(
@@ -185,14 +204,26 @@ class DashboardDataNotifier extends AsyncNotifier<DashboardData> {
       recent: recent.reversed.toList(),
       syncState: sync,
       pendingCount: pending,
+      cloud: cloud,
       hasInternet: online,
       onGatewayWifi: onGateway,
       usingMockGateway: ref.read(useMockGatewayProvider),
     );
   }
 
+  bool _refreshing = false;
+
+  /// Quiet reload: no loading state, and a failed reload keeps the last data.
   Future<void> refresh() async {
-    state = await AsyncValue.guard(_load);
+    if (_refreshing) return;
+    _refreshing = true;
+    try {
+      final next = await AsyncValue.guard(_load);
+      if (next.hasError && state.hasValue) return;
+      state = next;
+    } finally {
+      _refreshing = false;
+    }
   }
 }
 
@@ -243,9 +274,12 @@ final historyReadingsProvider = FutureProvider<List<Reading>>((ref) async {
           : null;
       break;
   }
-  return ref.read(readingRepositoryProvider).history(
+  return ref
+      .read(readingRepositoryProvider)
+      .history(
         stationId: AppConstants.defaultStationId,
         fromEpoch: from,
         toEpoch: to,
-      );
+      )
+      .timeout(const Duration(seconds: 15));
 });

@@ -65,7 +65,10 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('ESP8266 gateway', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                  const Text(
+                    'ESP8266 gateway',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                  ),
                   const SizedBox(height: 8),
                   Text('SSID: ${AppConstants.gatewaySsid}'),
                   Text('Gateway IP: ${AppConstants.gatewayIp}'),
@@ -76,7 +79,9 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                     builder: (context, snap) {
                       final on = snap.data ?? false;
                       return StatusChip(
-                        label: on ? 'Connected to WaterLevel WiFi' : 'Not on WaterLevel WiFi',
+                        label: on
+                            ? 'Connected to WaterLevel WiFi'
+                            : 'Not on WaterLevel WiFi',
                         ok: on || useMock,
                         warn: !on,
                       );
@@ -92,7 +97,10 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
                   Text('Records acknowledged: $_acked'),
                   if (_message != null) ...[
                     const SizedBox(height: 8),
-                    Text(_message!, style: const TextStyle(color: Color(0xFF9B1C1C))),
+                    Text(
+                      _message!,
+                      style: const TextStyle(color: Color(0xFF9B1C1C)),
+                    ),
                   ],
                 ],
               ),
@@ -103,9 +111,9 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
             onPressed: _busy
                 ? null
                 : () => _run(() async {
-                      final msg = await network.requestGatewayWifiConnection();
-                      setState(() => _message = msg);
-                    }),
+                    final msg = await network.requestGatewayWifiConnection();
+                    setState(() => _message = msg);
+                  }),
             icon: const Icon(Icons.wifi),
             label: const Text('Connect to WaterLevel WiFi'),
           ),
@@ -114,13 +122,13 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
             onPressed: _busy
                 ? null
                 : () => _run(() async {
-                      final gateway = ref.read(gatewayClientProvider);
-                      final status = await gateway.getStatus();
-                      setState(() {
-                        _statusText =
-                            '${status.device} · ${status.status} · queue ${status.queueCount}';
-                      });
-                    }),
+                    final gateway = ref.read(gatewayClientProvider);
+                    final status = await gateway.getStatus();
+                    setState(() {
+                      _statusText =
+                          '${status.device} · ${status.status} · queue ${status.queueCount}';
+                    });
+                  }),
             icon: const Icon(Icons.health_and_safety_outlined),
             label: const Text('Check gateway'),
           ),
@@ -129,11 +137,13 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
             onPressed: _busy
                 ? null
                 : () => _run(() async {
-                      final gateway = ref.read(gatewayClientProvider);
-                      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-                      await gateway.syncTime(now);
-                      setState(() => _message = 'Phone time sent to gateway ($now).');
-                    }),
+                    final gateway = ref.read(gatewayClientProvider);
+                    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+                    await gateway.syncTime(now);
+                    setState(
+                      () => _message = 'Phone time sent to gateway ($now).',
+                    );
+                  }),
             icon: const Icon(Icons.schedule),
             label: const Text('Synchronize time'),
           ),
@@ -142,18 +152,18 @@ class _ConnectionScreenState extends ConsumerState<ConnectionScreen> {
             onPressed: _busy
                 ? null
                 : () => _run(() async {
-                      final sync = ref.read(syncServiceProvider);
-                      final result = await sync.downloadFromGateway();
-                      setState(() {
-                        _downloaded = result.downloaded;
-                        _acked = result.acked;
-                        _lastDownload =
-                            DateTime.now().millisecondsSinceEpoch ~/ 1000;
-                        _message =
-                            'Inserted ${result.inserted}, duplicates ${result.duplicates}, ACK ${result.acked}';
-                        _statusText = 'Download complete';
-                      });
-                    }),
+                    final sync = ref.read(syncServiceProvider);
+                    final result = await sync.downloadFromGateway();
+                    setState(() {
+                      _downloaded = result.downloaded;
+                      _acked = result.acked;
+                      _lastDownload =
+                          DateTime.now().millisecondsSinceEpoch ~/ 1000;
+                      _message =
+                          'Inserted ${result.inserted}, duplicates ${result.duplicates}, ACK ${result.acked}';
+                      _statusText = 'Download complete';
+                    });
+                  }),
             icon: const Icon(Icons.download),
             label: const Text('Download readings'),
           ),

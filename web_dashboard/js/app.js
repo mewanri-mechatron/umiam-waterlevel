@@ -366,6 +366,21 @@ function trendLabel(delta24h) {
   return delta24h > 0 ? "Rising" : "Falling";
 }
 
+function formatLateSpan(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return "under 1 min";
+  const mins = Math.floor(s / 60);
+  if (mins < 60) return `${mins} min`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) {
+    const m = mins % 60;
+    return m === 0 ? `${hours} h` : `${hours} h ${m} min`;
+  }
+  const days = Math.floor(hours / 24);
+  const h = hours % 24;
+  return h === 0 ? `${days} d` : `${days} d ${h} h`;
+}
+
 function nextReadingLabel(latest) {
   if (!latest) return "—";
   const interval = Number(latest.send_interval_seconds) || 0;
@@ -373,7 +388,7 @@ function nextReadingLabel(latest) {
   if (!interval || !Number.isFinite(measured) || measured <= 0) return "—";
   const due = measured + interval;
   const remain = Math.ceil(due - Date.now() / 1000);
-  if (remain <= 0) return "Due now";
+  if (remain <= 0) return `Late by ${formatLateSpan(-remain)}`;
   const h = Math.floor(remain / 3600);
   const m = Math.floor((remain % 3600) / 60);
   const s = remain % 60;

@@ -10,6 +10,7 @@
       },
       "readings": {
         "$stationId": {
+          ".indexOn": ["measurement_time"],
           "$readingKey": {
             ".write": "auth != null",
             ".validate": "newData.hasChildren(['boot_id', 'seq', 'measurement_time', 'received_time', 'status']) && newData.child('boot_id').isNumber() && newData.child('seq').isNumber() && newData.child('measurement_time').isNumber() && newData.child('received_time').isNumber() && newData.child('status').isNumber()"
@@ -20,6 +21,21 @@
         "$stationId": {
           ".write": "auth != null",
           ".validate": "newData.hasChildren(['boot_id', 'seq', 'measurement_time', 'status'])"
+        }
+      },
+      "devices": {
+        "$deviceId": {
+          ".write": "auth != null && $deviceId.length <= 40",
+          ".validate": "newData.hasChildren(['device_id', 'last_seen_phone']) && newData.child('device_id').val() == $deviceId && newData.child('last_seen_phone').isNumber()"
+        }
+      },
+      "logs": {
+        "$deviceId": {
+          ".indexOn": ["created_at"],
+          "$logId": {
+            ".write": "auth != null && $deviceId.length <= 40",
+            ".validate": "newData.hasChildren(['created_at', 'level', 'category', 'message']) && newData.child('created_at').isNumber() && newData.child('level').isString() && newData.child('category').isString() && newData.child('message').isString() && newData.child('message').val().length <= 2000 && (!newData.hasChild('detail') || (newData.child('detail').isString() && newData.child('detail').val().length <= 2000))"
+          }
         }
       },
       "audit": {

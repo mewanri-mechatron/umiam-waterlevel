@@ -7,12 +7,7 @@ import 'audit_log_service.dart';
 import 'network_service.dart';
 import 'sync_service.dart';
 
-enum AutoSyncPhase {
-  idle,
-  downloading,
-  uploading,
-  error,
-}
+enum AutoSyncPhase { idle, downloading, uploading, error }
 
 class AutoSyncSnapshot {
   const AutoSyncSnapshot({
@@ -62,7 +57,11 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
   static const _gatewayTimeout = Duration(seconds: 25);
   static const _cloudPullTimeout = Duration(seconds: 30);
   static const _cloudPushTimeout = Duration(seconds: 45);
-  static const _cycleWatchdog = Duration(seconds: 50);
+  static const _cycleWatchdog = Duration(seconds: 75);
+
+  /// How often to auto-retry when readings are waiting / at the sensor.
+  static const _catchUpPendingGap = Duration(seconds: 45);
+  static const _catchUpSensorGap = Duration(seconds: 90);
 
   late final SyncService _sync;
   late final NetworkService _network;
@@ -81,6 +80,27 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
   DateTime? _lastGatewayAttempt;
   DateTime? _lastUploadAttempt;
   DateTime? _lastCycleAt;
+  DateTime? _lastCatchUpAt;
+  DateTime? _lastCloudPullAt;
+  DateTime? _lastRetentionAt;
+
+  /// A cycle body that outlived the watchdog keeps running (Dart futures are
+  /// not cancellable). No new cycle may start until it settles.
+  Future<void>? _bodyInFlight;
+
+  static const _leaseOwner = 'ui';
+  static const _leaseTtl = Duration(minutes: 3);
+
+  static const _storageFullMessage = 'Phone storage is full';
+
+  int _sensorFailures = 0;
+  bool _storageFull = false;
+
+  /// First open (and reinstall) must restore history from the cloud even if
+  /// the phone is on sensor WiFi with no pending uploads.
+  bool _startupCloudPull = true;
+  DateTime? _errorShownAt;
+  final Map<String, DateTime> _lastProblemLogAt = {};
 
   AutoSyncSnapshot snapshot = const AutoSyncSnapshot(
     phase: AutoSyncPhase.idle,
@@ -92,17 +112,27 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     if (_started) return;
     _started = true;
     WidgetsBinding.instance.addObserver(this);
-    await _audit.info('App started', category: 'app');
-    try {
-      final removed = await _sync.purgeLocalReadingsBeforeToday();
-      if (removed > 0) {
-        await _audit.info(
-          'Cleaned $removed old readings',
-          category: 'app',
-          detail: 'Kept from today 12:00 AM onward',
-        );
-      }
-    } catch (_) {}
+    final phone = await _network.phoneStatus();
+    await _audit.info(
+      'App opened',
+      category: 'app',
+      detail: phone == null
+          ? null
+          : '${phone.name} · Android ${phone.android} · '
+                'app ${phone.appVersion} · free ${phone.freeStorageMb} MB · '
+                'battery ${phone.batteryPct}%'
+                '${phone.batteryUnrestricted ? '' : ' · battery RESTRICTED'}'
+                '${phone.notificationsOn ? '' : ' · notifications OFF'}',
+    );
+    if (phone != null && phone.storageLow) {
+      await _audit.error(
+        'Phone storage almost full',
+        category: 'app',
+        detail: 'free ${phone.freeStorageMb} MB',
+      );
+    }
+    unawaited(_network.requestCloudReport(force: true));
+    await _maybeApplyRetention();
     await refreshConnectionStatus();
     _sub = _network.onConnectivityChanged.listen((_) {
       _debounce?.cancel();
@@ -121,20 +151,158 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     });
     _statusTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       unawaited(refreshConnectionStatus());
+      unawaited(_maybeStaleCatchUp());
     });
-    await runCycle();
+    // Force: pull cloud history + sensor + upload on every cold start.
+    await runCycle(force: true);
+  }
+
+  Future<void> _maybeApplyRetention() async {
+    final now = DateTime.now();
+    final last = _lastRetentionAt;
+    if (last != null && now.difference(last) < const Duration(hours: 12)) {
+      return;
+    }
+    _lastRetentionAt = now;
+    try {
+      final removed = await _sync.applyLocalRetention();
+      if (removed > 0) {
+        await _audit.info(
+          'Trimmed $removed old readings',
+          category: 'app',
+          detail:
+              'Already in cloud and older than '
+              '${SyncService.localRetention.inDays} days',
+        );
+      }
+    } catch (_) {}
+  }
+
+  /// Cloud → phone pull restores history after reinstall and picks up shared
+  /// calibration. Always runs once after the app opens.
+  Future<bool> _shouldPullFromCloud({required bool manual}) async {
+    if (_startupCloudPull) return true;
+    final last = _lastCloudPullAt;
+    final since = last == null ? null : DateTime.now().difference(last);
+    if (manual && (since == null || since > const Duration(minutes: 30))) {
+      return true;
+    }
+    if (since != null && since < const Duration(minutes: 10)) return false;
+    try {
+      final local = await _sync.countLocalReadings();
+      if (local < 20) return true;
+    } catch (_) {}
+    return since == null || since > const Duration(hours: 6);
+  }
+
+  /// Pull cloud readings/calibration. May briefly route over mobile data while
+  /// on sensor WiFi so a fresh install still gets history.
+  Future<void> _pullFromCloudNow({required bool onGateway}) async {
+    _set(
+      AutoSyncPhase.downloading,
+      'Getting readings from the cloud…',
+      hint: 'Please wait.',
+      busy: true,
+      stepLabel: 'Cloud',
+      onGateway: onGateway,
+    );
+    var releasedSoftAp = false;
+    try {
+      var canUpload = await _network.peekHasInternet();
+      if (!canUpload && onGateway) {
+        releasedSoftAp = await _network.pauseWifiForCloudUpload();
+        if (releasedSoftAp) {
+          await Future<void>.delayed(const Duration(seconds: 2));
+          await _network.bindToInternetNetwork();
+          canUpload = await _network.peekHasInternet();
+        }
+      }
+      if (!canUpload) {
+        await _audit.warn(
+          'Cloud restore skipped — no internet',
+          category: 'cloud',
+        );
+        return;
+      }
+      await _network.bindToInternetNetwork();
+      final pull = await _sync.pullFromFirebase().timeout(_cloudPullTimeout);
+      _lastCloudPullAt = DateTime.now();
+      _startupCloudPull = false;
+      await _audit.info(
+        'Cloud restore done',
+        category: 'cloud',
+        detail: pull.message,
+      );
+      if (pull.inserted > 0) {
+        // Dashboard must refresh after SQLite fills from the cloud.
+        // Home listens for busy→idle; message change also notifies.
+        _set(
+          AutoSyncPhase.idle,
+          pull.inserted == 1
+              ? 'Loaded 1 reading from the cloud'
+              : 'Loaded ${pull.inserted} readings from the cloud',
+          hint: 'Syncing the rest…',
+          stepLabel: 'Cloud',
+          onGateway: onGateway,
+        );
+      }
+    } catch (e) {
+      await _audit.warn(
+        'Cloud restore skipped',
+        category: 'cloud',
+        detail: e.toString(),
+      );
+      // Do not clear _startupCloudPull on hard failure — retry next cycle.
+    } finally {
+      if (releasedSoftAp) {
+        await _network.resumeWifiAfterCloudUpload();
+        if (await _network.isOnGatewayFast()) {
+          await _network.bindToGatewayNetwork();
+        }
+      }
+    }
+  }
+
+  /// If pending uploads sit around (or we're at the sensor), keep trying without
+  /// waiting for a manual Sync tap. Reuses [runCycle] — no parallel upload path.
+  Future<void> _maybeStaleCatchUp() async {
+    if (_disposed || _running || _bodyInFlight != null || snapshot.busy) {
+      return;
+    }
+
+    final pending = snapshot.pendingCount;
+    final onGateway = snapshot.onGateway;
+    final online = snapshot.hasInternet;
+    final demo = _isDemoMode();
+
+    final needsUpload = pending > 0 && (online || onGateway || demo);
+    final needsSensorPull = onGateway || demo;
+    if (!needsUpload && !needsSensorPull) return;
+
+    final now = DateTime.now();
+    final minGap = needsUpload ? _catchUpPendingGap : _catchUpSensorGap;
+    if (_lastCatchUpAt != null && now.difference(_lastCatchUpAt!) < minGap) {
+      return;
+    }
+
+    // Respect the normal cycle cooldown unless we clearly have work to drain.
+    if (!needsUpload &&
+        _lastCycleAt != null &&
+        now.difference(_lastCycleAt!) < minGap) {
+      return;
+    }
+
+    _lastCatchUpAt = now;
+    await runCycle(force: true, fromCatchUp: true);
   }
 
   Future<void> _onGatewayConnected() async {
-    await _audit.info(
-      'Connected to WaterLevel WiFi',
-      category: 'network',
-    );
+    await _audit.info('Connected to sensor WiFi', category: 'network');
     snapshot = AutoSyncSnapshot(
       phase: AutoSyncPhase.idle,
-      message: 'At sensor · syncing…',
-      hint: 'Pulling buffered readings from the station.',
-      stepLabel: 'At sensor',
+      message: 'Connected to sensor',
+      hint: 'Reading the sensor… please wait.',
+      stepLabel: 'Connected',
       wifiOn: true,
       onGateway: true,
       hasInternet: snapshot.hasInternet,
@@ -171,7 +339,8 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
       final prev = snapshot;
       final becameConnected = !prev.onGateway && onGateway;
 
-      final changed = prev.wifiOn != wifiOn ||
+      final changed =
+          prev.wifiOn != wifiOn ||
           prev.onGateway != onGateway ||
           prev.hasInternet != online ||
           prev.pendingCount != pending;
@@ -179,7 +348,7 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
       String? step = prev.stepLabel;
       String message = prev.message;
       String? hint = prev.hint;
-      if (!prev.busy) {
+      if (!prev.busy && !_holdError(prev)) {
         final status = _idleStatus(
           wifiOn: wifiOn,
           onGateway: onGateway,
@@ -191,11 +360,12 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
         hint = status.hint;
       }
 
-      final messageChanged = step != prev.stepLabel ||
+      final messageChanged =
+          step != prev.stepLabel ||
           message != prev.message ||
           hint != prev.hint;
       snapshot = AutoSyncSnapshot(
-        phase: prev.busy ? prev.phase : AutoSyncPhase.idle,
+        phase: prev.busy || _holdError(prev) ? prev.phase : AutoSyncPhase.idle,
         message: message,
         hint: hint,
         lastError: prev.lastError,
@@ -215,61 +385,66 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// Keeps an error on screen long enough to read; "storage full" stays until
+  /// a later save succeeds.
+  bool _holdError(AutoSyncSnapshot s) {
+    if (s.phase != AutoSyncPhase.error) return false;
+    if (_storageFull) return true;
+    final at = _errorShownAt;
+    return at != null &&
+        DateTime.now().difference(at) < const Duration(seconds: 60);
+  }
+
   ({String step, String message, String? hint}) _idleStatus({
     required bool wifiOn,
     required bool onGateway,
     required bool online,
     required int pending,
   }) {
+    // Guards are not technical: plain words, one clear action at most.
     if (!wifiOn && !online) {
       return (
         step: 'Offline',
-        message: 'No WiFi and no mobile data',
-        hint: 'Turn on mobile data to send readings, or WiFi near the sensor.',
+        message: 'WiFi and mobile data are off',
+        hint: 'Please turn on WiFi and mobile data.',
       );
     }
     if (onGateway) {
       if (pending > 0) {
         return (
-          step: 'At sensor',
-          message: 'Saved on phone · $pending waiting for cloud',
-          hint:
-              'Leave WaterLevel WiFi (or turn WiFi off) so mobile data can reach the cloud.',
+          step: 'Connected',
+          message: 'Connected to sensor · $pending readings saved',
+          hint: online
+              ? 'Sending automatically.'
+              : 'They will be sent automatically. Keep mobile data on.',
         );
       }
       return (
-        step: 'At sensor',
-        message: 'On sensor WiFi · ready',
-        hint: 'Collects readings here. Leave SoftAP when you need to upload.',
-      );
-    }
-    if (online) {
-      if (pending > 0) {
-        return (
-          step: 'Waiting to send',
-          message: '$pending readings waiting to send',
-          hint: 'Tap Sync to push them to the cloud now.',
-        );
-      }
-      return (
-        step: 'Online',
-        message: 'Online · not at sensor',
-        hint: 'Near the station, tap Connect to sensor.',
+        step: 'Connected',
+        message: 'Connected to sensor · nothing waiting to send',
+        hint: 'Waiting for the next sensor reading. Keep the phone charged.',
       );
     }
     if (!wifiOn) {
       return (
         step: 'WiFi off',
         message: 'WiFi is off',
-        hint: pending > 0
-            ? 'Turn on mobile data and tap Sync to send $pending readings.'
-            : 'Turn on WiFi near the sensor, or use mobile data for cloud.',
+        hint: 'Turn on WiFi so the phone can read the sensor.',
+      );
+    }
+    if (online && pending > 0) {
+      return (
+        step: 'Sending',
+        message: '$pending readings waiting to send',
+        hint: 'Sending automatically.',
       );
     }
     return (
-      step: 'Waiting',
-      message: 'Not at sensor · no internet',
-      hint: 'Join WaterLevel near the station, or turn on mobile data.',
+      step: 'Not connected',
+      message: 'Not connected to the sensor',
+      hint: online
+          ? 'Near the sensor, tap “Connect to sensor”.'
+          : 'Tap “Connect to sensor”. Keep mobile data on.',
     );
   }
 
@@ -281,18 +456,19 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> runCycle({bool force = false}) async {
+  Future<void> runCycle({bool force = false, bool fromCatchUp = false}) async {
     if (_disposed) return;
-    if (_running) {
-      if (!force) return;
-      for (var i = 0; i < 40 && _running; i++) {
+    final aggressive = force || fromCatchUp;
+    if (_running || _bodyInFlight != null) {
+      if (!aggressive) return;
+      for (var i = 0; i < 40 && (_running || _bodyInFlight != null); i++) {
         await Future<void>.delayed(const Duration(milliseconds: 100));
       }
-      if (_running || _disposed) return;
+      if (_running || _bodyInFlight != null || _disposed) return;
     }
 
     final now = DateTime.now();
-    if (!force &&
+    if (!aggressive &&
         _lastCycleAt != null &&
         now.difference(_lastCycleAt!) < const Duration(seconds: 8)) {
       await refreshConnectionStatus();
@@ -302,36 +478,53 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     _running = true;
     _lastCycleAt = now;
     try {
+      // The background service / worker share this process's network binding
+      // and database; never run a cycle on top of theirs.
+      if (!await _network.acquireSyncLease(_leaseOwner, _leaseTtl)) {
+        if (force && !fromCatchUp) {
+          _set(
+            AutoSyncPhase.idle,
+            'Sending in the background…',
+            hint: 'This screen updates by itself.',
+            stepLabel: 'Working',
+          );
+        }
+        return;
+      }
+      final body = _runCycleBody(force: aggressive, fromCatchUp: fromCatchUp);
+      _bodyInFlight = body;
+      unawaited(
+        body.catchError((Object _) {}).whenComplete(() {
+          if (identical(_bodyInFlight, body)) _bodyInFlight = null;
+          unawaited(_network.releaseSyncLease(_leaseOwner));
+          unawaited(_network.requestCloudReport());
+        }),
+      );
       try {
-        await _runCycleBody(force: force).timeout(_cycleWatchdog);
+        await body.timeout(_cycleWatchdog);
       } on TimeoutException catch (e) {
         final pending = await _loadPending();
         await _audit.error(
-          'Sync cycle · TIMEOUT',
+          'Sync cycle took too long',
           category: 'sync',
           detail: e.toString(),
         );
         _set(
           AutoSyncPhase.error,
-          'Sync timed out · stopped so the app does not hang',
+          'Taking longer than usual · will try again',
           error: e.toString(),
-          hint: snapshot.onGateway && pending > 0
-              ? 'Leave WaterLevel WiFi, confirm 4G, then tap Retry Sync.'
-              : 'Check mobile data / sensor WiFi, then tap Retry Sync.',
+          hint: _safeHint(pending),
           pendingCount: pending,
         );
       } catch (e) {
         final pending = await _loadPending();
-        await _audit.error(
-          'Sync cycle · FAILED',
-          category: 'sync',
-          detail: '$e',
-        );
+        await _audit.error('Sync cycle failed', category: 'sync', detail: '$e');
+        final problem = _plainProblem(e, pending);
         _set(
           AutoSyncPhase.error,
-          'Sync failed',
+          problem.message,
           error: e.toString(),
-          hint: 'Check mobile data / sensor WiFi, then tap Retry Sync.',
+          hint: problem.hint,
           pendingCount: pending,
         );
       }
@@ -344,29 +537,62 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _runCycleBody({required bool force}) async {
+  String _safeHint(int pending) => pending > 0
+      ? 'Readings are safe on this phone. It will try again by itself.'
+      : 'It will try again by itself.';
+
+  /// Turns a technical error into one short line a guard can act on.
+  ({String message, String hint}) _plainProblem(Object e, int pending) {
+    final text = e.toString().toLowerCase();
+    if (text.contains('disk is full') ||
+        text.contains('sqlite_full') ||
+        text.contains('no space left') ||
+        text.contains('enospc')) {
+      return (
+        message: _storageFullMessage,
+        hint: 'Delete some photos or videos, then open the app again.',
+      );
+    }
+    return (
+      message: 'Could not finish · will try again',
+      hint: _safeHint(pending),
+    );
+  }
+
+  Future<void> _runCycleBody({
+    required bool force,
+    bool fromCatchUp = false,
+  }) async {
     await refreshConnectionStatus();
     var onGateway = snapshot.onGateway;
     final demo = _isDemoMode();
     final wifiOn = snapshot.wifiOn;
     final online = snapshot.hasInternet;
 
-    if (force) {
-      await _audit.info('Manual sync started', category: 'sync');
+    if (force && !fromCatchUp) {
+      await _audit.info('Sync tapped', category: 'sync');
     }
 
     if (!wifiOn && !online && !demo) {
       _set(
         AutoSyncPhase.idle,
-        'Offline · no network',
-        hint: 'Turn on mobile data to send readings, or WiFi near the sensor.',
+        'WiFi and mobile data are off',
+        hint: 'Please turn on WiFi and mobile data.',
         stepLabel: 'Offline',
       );
       return;
     }
 
+    // Restore cloud history first when this phone is empty / just opened,
+    // so the Level screen is not blank after reinstall.
+    if (await _shouldPullFromCloud(manual: force && !fromCatchUp)) {
+      await _pullFromCloudNow(onGateway: onGateway);
+      onGateway = await _network.isOnGatewayFast();
+    }
+
     if (onGateway || demo) {
-      final canTryGateway = force ||
+      final canTryGateway =
+          force ||
           _lastGatewayAttempt == null ||
           DateTime.now().difference(_lastGatewayAttempt!) >
               const Duration(seconds: 20);
@@ -374,380 +600,293 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
         _lastGatewayAttempt = DateTime.now();
         _set(
           AutoSyncPhase.downloading,
-          'Getting readings from sensor…',
-          hint: 'Stay on WaterLevel WiFi until this finishes.',
+          'Reading the sensor…',
+          hint: 'Please wait.',
           busy: true,
           stepLabel: 'Sensor',
           onGateway: true,
         );
         try {
           await _network.bindToGatewayNetwork();
-          final result = await _sync
-              .downloadFromGateway()
-              .timeout(_gatewayTimeout);
-          final pending = await _loadPending();
-          await _audit.info(
-            result.inserted > 0
-                ? 'Sensor download · SUCCESS'
-                : 'Sensor download · OK',
-            category: 'sensor',
-            detail:
-                'new=${result.inserted} already_saved=${result.duplicates} '
-                'pending_upload=$pending'
-                '${result.message == null ? '' : ' · ${result.message}'}',
+          final result = await _sync.downloadFromGateway().timeout(
+            _gatewayTimeout,
           );
-          final leaveHint = pending > 0
-              ? 'Leave WaterLevel WiFi (or turn WiFi off) so mobile data can reach the cloud.'
-              : 'Collects readings here. Leave SoftAP when you need to upload.';
+          final pending = await _loadPending();
+          _sensorFailures = 0;
+          if (result.inserted > 0) _storageFull = false;
           if (result.inserted > 0) {
-            _set(
-              AutoSyncPhase.idle,
-              'Saved ${result.inserted} new readings'
-              '${pending > 0 ? ' · $pending waiting to send' : ''}',
-              hint: leaveHint,
-              stepLabel: 'At sensor',
-              pendingCount: pending,
-              onGateway: true,
-            );
-          } else if (result.downloaded == 0) {
-            _set(
-              AutoSyncPhase.idle,
-              'At sensor · no new readings yet',
-              hint: leaveHint,
-              stepLabel: 'At sensor',
-              pendingCount: pending,
-              onGateway: true,
-            );
-          } else {
-            _set(
-              AutoSyncPhase.idle,
-              'At sensor · already saved'
-              '${pending > 0 ? ' · $pending waiting to send' : ''}',
-              hint: leaveHint,
-              stepLabel: 'At sensor',
-              pendingCount: pending,
-              onGateway: true,
+            await _audit.info(
+              'Saved ${result.inserted} new readings from sensor',
+              category: 'sensor',
+              detail:
+                  'already_saved=${result.duplicates} waiting=$pending'
+                  '${result.message == null ? '' : ' · ${result.message}'}',
             );
           }
-        } on TimeoutException catch (e) {
-          await _audit.error(
-            'Sensor download · TIMEOUT',
-            category: 'sensor',
-            detail: e.toString(),
-          );
+          final nextHint = pending > 0
+              ? 'Sending automatically.'
+              : 'Everything is working.';
           _set(
-            AutoSyncPhase.error,
-            'Sensor timed out',
-            error: e.toString(),
-            hint:
-                'Sensor not responding on WaterLevel. Move closer and reconnect SoftAP, then tap Retry Sync.',
-            stepLabel: 'Sensor error',
+            AutoSyncPhase.idle,
+            result.inserted > 0
+                ? 'Saved ${result.inserted} new readings'
+                : 'Connected to sensor · no new reading yet',
+            hint: nextHint,
+            stepLabel: 'Connected',
+            pendingCount: pending,
             onGateway: true,
           );
         } catch (e) {
-          await _audit.error(
-            'Sensor download · FAILED',
-            category: 'sensor',
-            detail: e.toString(),
+          _sensorFailures++;
+          await _auditOnce(
+            'sensor_error',
+            () => _audit.error(
+              e is TimeoutException
+                  ? 'Sensor did not answer in time'
+                  : 'Could not read the sensor',
+              category: 'sensor',
+              detail: e.toString(),
+            ),
           );
+          final problem = _plainProblem(e, 0);
+          final storage = problem.message == _storageFullMessage;
           _set(
             AutoSyncPhase.error,
-            'Could not get readings from sensor',
+            storage ? problem.message : 'Sensor is not answering',
             error: e.toString(),
-            hint:
-                'Stay on WaterLevel WiFi near the station, then tap Retry Sync.',
-            stepLabel: 'Sensor error',
+            hint: storage
+                ? problem.hint
+                : (_sensorFailures >= 3
+                      ? 'Check that the sensor has power. The app keeps trying.'
+                      : 'The app will try again by itself.'),
+            stepLabel: 'Sensor',
             onGateway: true,
           );
         }
       }
     }
 
-    // Cloud: pull shared settings + readings, then push local pending.
+    // Cloud: optional pull of shared settings/history, then push pending.
     var canUpload = await _network.peekHasInternet();
     final pendingBeforeCloud = await _loadPending();
-    var wifiPausedForUpload = false;
+    var releasedSoftApForUpload = false;
 
-    // SoftAP blocks cloud. Pause WiFi briefly so LTE can carry the upload.
+    // Sensor WiFi has no internet. Route over mobile data while WiFi stays on.
     if (onGateway && pendingBeforeCloud > 0 && !canUpload) {
       _set(
         AutoSyncPhase.uploading,
-        'Pausing SoftAP WiFi to reach cloud…',
-        hint: 'Turning WiFi off briefly so mobile data can upload.',
+        'Sending readings…',
+        hint: 'Please wait.',
         busy: true,
-        stepLabel: 'Cloud',
+        stepLabel: 'Sending',
         pendingCount: pendingBeforeCloud,
         onGateway: true,
       );
-      wifiPausedForUpload = await _network.pauseWifiForCloudUpload();
-      if (wifiPausedForUpload) {
-        await Future<void>.delayed(const Duration(seconds: 4));
+      releasedSoftApForUpload = await _network.pauseWifiForCloudUpload();
+      if (releasedSoftApForUpload) {
+        await Future<void>.delayed(const Duration(seconds: 2));
         await _network.bindToInternetNetwork();
         canUpload = await _network.peekHasInternet();
         onGateway = false;
       }
     }
 
-    if (!canUpload && !online && pendingBeforeCloud > 0) {
-      if (wifiPausedForUpload) {
-        await _network.resumeWifiAfterCloudUpload();
-      }
-      _set(
-        AutoSyncPhase.error,
-        'Saved on phone · $pendingBeforeCloud waiting for cloud',
-        hint:
-            'Turn on mobile data, leave WaterLevel WiFi, then tap Retry Sync.',
-        stepLabel: 'Waiting to send',
-        pendingCount: pendingBeforeCloud,
-      );
-      return;
-    }
-
-    if (canUpload || (force && (online || canUpload))) {
-      final canTryUpload = force ||
-          _lastUploadAttempt == null ||
-          DateTime.now().difference(_lastUploadAttempt!) >
-              const Duration(seconds: 15);
-      if (canTryUpload) {
-        _lastUploadAttempt = DateTime.now();
-
-        _set(
-          AutoSyncPhase.downloading,
-          'Getting data from cloud…',
-          hint: 'Using mobile data / internet WiFi.',
-          busy: true,
-          stepLabel: 'Cloud',
+    try {
+      if (!canUpload && !online && pendingBeforeCloud > 0) {
+        await _auditOnce(
+          'no_internet',
+          () => _audit.warn(
+            'No internet — $pendingBeforeCloud readings waiting on phone',
+            category: 'cloud',
+          ),
         );
-        try {
-          await _network.bindToInternetNetwork();
-          final pull = await _sync
-              .pullFromFirebase()
-              .timeout(_cloudPullTimeout);
-          await _audit.info(
-            'Cloud get · OK',
-            category: 'cloud',
-            detail: pull.message,
-          );
-        } on TimeoutException catch (e) {
-          await _audit.warn(
-            'Cloud get · TIMEOUT',
-            category: 'cloud',
-            detail: e.toString(),
-          );
-        } catch (e) {
-          await _audit.warn(
-            'Cloud get · skipped',
-            category: 'cloud',
-            detail: e.toString(),
-          );
-        }
+        _set(
+          AutoSyncPhase.idle,
+          '$pendingBeforeCloud readings saved on phone',
+          hint:
+              'No internet now. Please keep mobile data on — they will be '
+              'sent automatically.',
+          stepLabel: 'Waiting',
+          pendingCount: pendingBeforeCloud,
+        );
+        return;
+      }
 
-        final beforePending = await _loadPending();
-        if (beforePending == 0 && !force) {
-          if (wifiPausedForUpload) {
-            await _network.resumeWifiAfterCloudUpload();
-          }
-          _set(
-            AutoSyncPhase.idle,
-            snapshot.onGateway
-                ? 'At sensor · cloud is up to date'
-                : 'Up to date',
-            hint: snapshot.onGateway
-                ? 'No pending uploads. You can leave SoftAP anytime.'
-                : 'Cloud matches this phone.',
-            stepLabel: snapshot.onGateway ? 'At sensor' : 'Up to date',
-            pendingCount: 0,
-          );
-        } else if (beforePending > 0 || force) {
-          _set(
-            AutoSyncPhase.uploading,
-            beforePending > 0
-                ? 'Sending $beforePending readings to cloud…'
-                : 'Checking cloud…',
-            hint: onGateway
-                ? 'If this stalls, leave WaterLevel WiFi and tap Retry Sync.'
-                : 'Keep mobile data on until finished.',
-            busy: true,
-            stepLabel: 'Sending',
-            pendingCount: beforePending,
-          );
-          try {
-            await _network.bindToInternetNetwork();
-            var result = await _sync
-                .uploadPendingToFirebase()
-                .timeout(_cloudPushTimeout);
-            if (result.message == 'Upload already in progress.') {
-              await Future<void>.delayed(const Duration(seconds: 2));
-              result = await _sync
-                  .uploadPendingToFirebase()
-                  .timeout(_cloudPushTimeout);
-            }
-            if (await _network.isOnGatewayFast()) {
-              await _network.bindToGatewayNetwork();
-              onGateway = true;
-            }
-            final detail = result.message ?? '';
-            final pending = result.pendingRemaining < 0
-                ? await _loadPending()
-                : result.pendingRemaining;
+      if (canUpload || (force && (online || canUpload))) {
+        final canTryUpload =
+            force ||
+            _lastUploadAttempt == null ||
+            DateTime.now().difference(_lastUploadAttempt!) >
+                const Duration(seconds: 15);
+        if (canTryUpload) {
+          _lastUploadAttempt = DateTime.now();
 
-            if (result.uploaded > 0 && result.failed == 0) {
-              await _audit.info(
-                'Cloud push · SUCCESS',
-                category: 'cloud',
-                detail:
-                    'uploaded=${result.uploaded} pending=$pending'
-                    '${detail.isEmpty ? '' : ' · $detail'}',
-              );
-              _set(
-                AutoSyncPhase.idle,
-                pending > 0
-                    ? 'Sent ${result.uploaded} · $pending still waiting'
-                    : 'Sent ${result.uploaded} · up to date',
-                hint: pending > 0
-                    ? (onGateway
-                        ? 'Leave WaterLevel WiFi so the rest can upload.'
-                        : 'Tap Sync again to send the rest.')
-                    : 'Cloud is up to date.',
-                stepLabel: onGateway ? 'At sensor' : 'Up to date',
-                pendingCount: pending,
-                onGateway: onGateway,
-              );
-            } else if (detail.startsWith('No internet') ||
-                result.pendingRemaining < 0) {
-              await _audit.warn(
-                'Cloud push · PENDING (no internet)',
-                category: 'cloud',
-                detail: 'pending=$pending · $detail',
-              );
-              _set(
-                AutoSyncPhase.error,
-                '$pending waiting · no internet path',
-                error: detail,
-                hint:
-                    'Leave WaterLevel WiFi, confirm 4G in the status bar, then tap Retry Sync.',
-                stepLabel: 'Waiting to send',
-                pendingCount: pending,
-                onGateway: onGateway,
-              );
-            } else if (result.failed > 0) {
-              await _audit.error(
-                'Cloud push · FAILED',
-                category: 'cloud',
-                detail:
-                    'uploaded=${result.uploaded} failed=${result.failed} '
-                    'pending=$pending · $detail',
-              );
-              _set(
-                AutoSyncPhase.error,
-                'Could not send to cloud · $pending still on phone',
-                error: detail,
-                hint:
-                    'Leave SoftAP if connected, confirm mobile data, then tap Retry Sync.',
-                stepLabel: 'Cloud error',
-                pendingCount: pending,
-                onGateway: onGateway,
-              );
-            } else if (pending > 0) {
-              await _audit.warn(
-                'Cloud push · PENDING',
-                category: 'cloud',
-                detail: 'pending=$pending · $detail',
-              );
-              _set(
-                AutoSyncPhase.idle,
-                '$pending still waiting to send',
-                hint: onGateway
-                    ? 'Leave WaterLevel WiFi so mobile data can upload.'
-                    : 'Tap Sync to try again.',
-                stepLabel: 'Waiting to send',
-                pendingCount: pending,
-                onGateway: onGateway,
-              );
-            } else {
-              await _audit.info(
-                'Cloud push · SUCCESS (nothing pending)',
-                category: 'cloud',
-                detail: detail.isEmpty ? 'queue empty' : detail,
-              );
-              _set(
-                AutoSyncPhase.idle,
-                'Up to date',
-                hint: 'Cloud matches this phone.',
-                stepLabel: onGateway ? 'At sensor' : 'Up to date',
-                pendingCount: 0,
-                onGateway: onGateway,
-              );
-            }
-          } on TimeoutException catch (e) {
-            final pending = await _loadPending();
-            if (await _network.isOnGatewayFast()) {
-              await _network.bindToGatewayNetwork();
-              onGateway = true;
-            }
-            await _audit.error(
-              'Cloud push · TIMEOUT',
-              category: 'cloud',
-              detail: e.toString(),
-            );
+          await _maybeApplyRetention();
+
+          final beforePending = await _loadPending();
+          if (beforePending == 0 && !force) {
+            _setAllSent();
+          } else if (beforePending > 0 || force) {
             _set(
-              AutoSyncPhase.error,
-              'Cloud send timed out · $pending still on phone',
-              error: e.toString(),
-              hint:
-                  'Leave WaterLevel WiFi, confirm 4G, then tap Retry Sync.',
-              stepLabel: 'Cloud error',
-              pendingCount: pending,
-              onGateway: onGateway,
+              AutoSyncPhase.uploading,
+              beforePending > 0
+                  ? 'Sending $beforePending readings…'
+                  : 'Checking…',
+              hint: 'Please wait.',
+              busy: true,
+              stepLabel: 'Sending',
+              pendingCount: beforePending,
             );
-          } catch (e) {
-            final pending = await _loadPending();
-            if (await _network.isOnGatewayFast()) {
-              await _network.bindToGatewayNetwork();
-              onGateway = true;
-            }
-            await _audit.error(
-              'Cloud push · FAILED',
-              category: 'cloud',
-              detail: e.toString(),
-            );
-            _set(
-              AutoSyncPhase.error,
-              'Could not send · $pending still on phone',
-              error: e.toString(),
-              hint:
-                  'Leave SoftAP if connected, confirm mobile data, then tap Retry Sync.',
-              stepLabel: 'Cloud error',
-              pendingCount: pending,
-              onGateway: onGateway,
-            );
-          } finally {
-            if (wifiPausedForUpload) {
-              await _network.resumeWifiAfterCloudUpload();
+            try {
+              await _network.bindToInternetNetwork();
+              var result = await _sync.uploadPendingToFirebase().timeout(
+                _cloudPushTimeout,
+              );
+              if (result.message == 'Upload already in progress.') {
+                await Future<void>.delayed(const Duration(seconds: 2));
+                result = await _sync.uploadPendingToFirebase().timeout(
+                  _cloudPushTimeout,
+                );
+              }
               if (await _network.isOnGatewayFast()) {
                 await _network.bindToGatewayNetwork();
                 onGateway = true;
               }
+              final detail = result.message ?? '';
+              final pending = result.pendingRemaining < 0
+                  ? await _loadPending()
+                  : result.pendingRemaining;
+
+              if (result.uploaded > 0) {
+                _storageFull = false;
+                await _audit.info(
+                  'Sent ${result.uploaded} readings to cloud',
+                  category: 'cloud',
+                  detail:
+                      'waiting=$pending'
+                      '${detail.isEmpty ? '' : ' · $detail'}',
+                );
+              }
+              if (pending == 0) {
+                _setAllSent(onGateway: onGateway);
+              } else {
+                final noRoute =
+                    detail.startsWith('No internet') ||
+                    result.pendingRemaining < 0;
+                if (result.failed > 0 || noRoute) {
+                  await _auditOnce(
+                    noRoute ? 'no_route' : 'upload_failed',
+                    () => _audit.warn(
+                      noRoute
+                          ? 'Upload waiting — no internet path'
+                          : 'Upload failed',
+                      category: 'cloud',
+                      detail:
+                          'uploaded=${result.uploaded} '
+                          'failed=${result.failed} waiting=$pending · $detail',
+                    ),
+                  );
+                }
+                _set(
+                  AutoSyncPhase.idle,
+                  '$pending readings waiting to send',
+                  error: detail.isEmpty ? null : detail,
+                  hint: noRoute
+                      ? 'No internet now. Please keep mobile data on.'
+                      : _safeHint(pending),
+                  stepLabel: 'Waiting',
+                  pendingCount: pending,
+                  onGateway: onGateway,
+                );
+              }
+            } catch (e) {
+              final pending = await _loadPending();
+              if (await _network.isOnGatewayFast()) {
+                await _network.bindToGatewayNetwork();
+                onGateway = true;
+              }
+              await _auditOnce(
+                'upload_error',
+                () => _audit.error(
+                  e is TimeoutException
+                      ? 'Upload took too long'
+                      : 'Upload failed',
+                  category: 'cloud',
+                  detail: e.toString(),
+                ),
+              );
+              final problem = _plainProblem(e, pending);
+              _set(
+                AutoSyncPhase.error,
+                pending > 0 && problem.message != _storageFullMessage
+                    ? '$pending readings waiting to send'
+                    : problem.message,
+                error: e.toString(),
+                hint: problem.hint,
+                stepLabel: 'Waiting',
+                pendingCount: pending,
+                onGateway: onGateway,
+              );
             }
           }
         }
+      } else if (!onGateway && !demo) {
+        final pending = await _loadPending();
+        final status = _idleStatus(
+          wifiOn: wifiOn,
+          onGateway: false,
+          online: online,
+          pending: pending,
+        );
+        _set(
+          AutoSyncPhase.idle,
+          status.message,
+          hint: status.hint,
+          stepLabel: status.step,
+          pendingCount: pending,
+        );
       }
-    } else if (!onGateway && !demo) {
-      final pending = await _loadPending();
-      final status = _idleStatus(
-        wifiOn: wifiOn,
-        onGateway: false,
-        online: online,
-        pending: pending,
-      );
-      _set(
-        AutoSyncPhase.idle,
-        status.message,
-        hint: status.hint,
-        stepLabel: status.step,
-        pendingCount: pending,
-      );
+    } finally {
+      // Restore the sensor WiFi after a SoftAP→LTE handoff. Never open the
+      // system WiFi panel from an automatic cycle (it pops up over the app).
+      if (releasedSoftApForUpload) {
+        await _network.resumeWifiAfterCloudUpload();
+        if (await _network.isOnGatewayFast()) {
+          await _network.bindToGatewayNetwork();
+          // Upload ran off SoftAP; ACK needs sensor WiFi — retry now.
+          try {
+            await _sync.ackEspAfterCloud();
+          } catch (_) {}
+        }
+      }
     }
+  }
+
+  /// Repeating problems (every catch-up cycle) are logged once per 30 min.
+  Future<void> _auditOnce(String key, Future<void> Function() log) async {
+    final now = DateTime.now();
+    final last = _lastProblemLogAt[key];
+    if (last != null && now.difference(last) < const Duration(minutes: 30)) {
+      return;
+    }
+    _lastProblemLogAt[key] = now;
+    await log();
+  }
+
+  void _setAllSent({bool? onGateway}) {
+    final atSensor = onGateway ?? snapshot.onGateway;
+    _set(
+      AutoSyncPhase.idle,
+      atSensor
+          ? 'Connected to sensor · nothing waiting to send'
+          : 'Nothing waiting to send',
+      hint: atSensor
+          ? 'Waiting for the next sensor reading.'
+          : 'Connect to the sensor to collect newer readings.',
+      stepLabel: atSensor ? 'Connected' : 'Synced',
+      pendingCount: 0,
+      onGateway: onGateway,
+    );
   }
 
   void _set(
@@ -761,6 +900,10 @@ class AutoSyncController extends ChangeNotifier with WidgetsBindingObserver {
     bool? onGateway,
   }) {
     if (_disposed) return;
+    if (phase == AutoSyncPhase.error) {
+      _errorShownAt = DateTime.now();
+      if (message == _storageFullMessage) _storageFull = true;
+    }
     snapshot = AutoSyncSnapshot(
       phase: phase,
       message: message,

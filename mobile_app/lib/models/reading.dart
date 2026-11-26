@@ -18,6 +18,7 @@ class Reading {
     this.firebaseUploaded = false,
     required this.createdAt,
     this.isSimulated = false,
+    this.gatewayRecordId,
   });
 
   final int? id;
@@ -36,6 +37,10 @@ class Reading {
   final int createdAt;
   final bool isSimulated;
 
+  /// Node B queue id (`/data` / `/ack?upto=`). Kept until the reading is in
+  /// the cloud so the ESP is never told to delete an unsent reading.
+  final int? gatewayRecordId;
+
   String get identityKey => '${stationId}_${bootId}_$seq';
   String get firebaseKey => '${bootId}_$seq';
 
@@ -49,6 +54,7 @@ class Reading {
     int? id,
     int? waterLevelMm,
     bool? firebaseUploaded,
+    int? gatewayRecordId,
     bool clearWaterLevel = false,
   }) {
     return Reading(
@@ -68,6 +74,7 @@ class Reading {
       firebaseUploaded: firebaseUploaded ?? this.firebaseUploaded,
       createdAt: createdAt,
       isSimulated: isSimulated,
+      gatewayRecordId: gatewayRecordId ?? this.gatewayRecordId,
     );
   }
 
@@ -87,6 +94,7 @@ class Reading {
         'firebase_uploaded': firebaseUploaded ? 1 : 0,
         'created_at': createdAt,
         'is_simulated': isSimulated ? 1 : 0,
+        if (gatewayRecordId != null) 'gateway_record_id': gatewayRecordId,
       };
 
   factory Reading.fromMap(Map<String, Object?> map) => Reading(
@@ -105,6 +113,7 @@ class Reading {
         firebaseUploaded: (map['firebase_uploaded'] as int? ?? 0) == 1,
         createdAt: map['created_at']! as int,
         isSimulated: (map['is_simulated'] as int? ?? 0) == 1,
+        gatewayRecordId: map['gateway_record_id'] as int?,
       );
 
   /// Rebuild a local reading from an RTDB node written by [toFirebaseMap].

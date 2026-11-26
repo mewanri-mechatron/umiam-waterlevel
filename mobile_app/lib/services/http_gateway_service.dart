@@ -11,18 +11,19 @@ class HttpGatewayService implements GatewayClient {
     Dio? dio,
     NetworkService? networkService,
     this.baseUrl = AppConstants.gatewayBaseUrl,
-  })  : _dio = dio ??
-            Dio(
-              BaseOptions(
-                baseUrl: baseUrl,
-                connectTimeout: const Duration(seconds: 8),
-                receiveTimeout: const Duration(seconds: 12),
-                sendTimeout: const Duration(seconds: 8),
-                headers: {'Accept': 'application/json'},
-                validateStatus: (code) => code != null && code < 500,
-              ),
-            ),
-        _network = networkService ?? NetworkService();
+  }) : _dio =
+           dio ??
+           Dio(
+             BaseOptions(
+               baseUrl: baseUrl,
+               connectTimeout: const Duration(seconds: 8),
+               receiveTimeout: const Duration(seconds: 12),
+               sendTimeout: const Duration(seconds: 8),
+               headers: {'Accept': 'application/json'},
+               validateStatus: (code) => code != null && code < 500,
+             ),
+           ),
+       _network = networkService ?? NetworkService();
 
   final Dio _dio;
   final NetworkService _network;
@@ -123,11 +124,13 @@ class HttpGatewayService implements GatewayClient {
         var more = false;
         if (body is Map) {
           final map = Map<String, dynamic>.from(body);
-          lastId = _asInt(map['last_id'] ?? map['lastId']) ??
+          lastId =
+              _asInt(map['last_id'] ?? map['lastId']) ??
               records
                   .map((r) => r.recordId ?? 0)
                   .fold<int>(since, (a, b) => a > b ? a : b);
-          more = map['more'] == true || map['more'] == 1 || map['more'] == 'true';
+          more =
+              map['more'] == true || map['more'] == 1 || map['more'] == 'true';
         } else if (records.isNotEmpty) {
           lastId = records
               .map((r) => r.recordId ?? 0)

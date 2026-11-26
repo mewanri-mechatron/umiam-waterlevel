@@ -81,8 +81,7 @@ class MockGatewayService implements GatewayClient {
       ageSeconds: 5 + _random.nextInt(25),
       measurementTime: now - (5 + _random.nextInt(25)),
       distanceMm: distance,
-      waterLevelMm: level ??
-          (distance == null ? null : 5000 - distance),
+      waterLevelMm: level ?? (distance == null ? null : 5000 - distance),
       status: status,
       validSamples: samples,
       sendIntervalSeconds: _interval,
@@ -128,7 +127,10 @@ class MockGatewayService implements GatewayClient {
   }
 
   @override
-  Future<List<GatewayReadingDto>> getData({int sinceId = 0, int limit = 200}) async {
+  Future<List<GatewayReadingDto>> getData({
+    int sinceId = 0,
+    int limit = 200,
+  }) async {
     await Future<void>.delayed(const Duration(milliseconds: 180));
     _maybeFail();
     _ensureQueue();

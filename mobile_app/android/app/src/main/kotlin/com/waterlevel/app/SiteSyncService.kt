@@ -37,219 +37,330 @@ class SiteSyncService : Service() {
     private val executor = Executors.newSingleThreadExecutor()
     private val cycleRunning = AtomicBoolean(false)
     private val tickMs = 75_000L
+    /** Faster follow-up when rows are still waiting to reach Firebase. */
+    private val catchUpTickMs = 35_000L
+    /** Retry SoftAP→LTE handoff a bit sooner when upload cannot start. */
+    private val noInternetTickMs = 45_000L
+    @Volatile
+    private var foregroundOk = false
+    @Volatile
+    private var destroyed = false
 
     override fun onBind(intent: Intent?): android.os.IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        CrashWatch.install(this)
+        val app = applicationContext
+        Thread { CrashWatch.reportPastExits(app) }.start()
         createChannel()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIF_ID,
-                buildNotification("Watching for WaterLevel WiFi…"),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-            )
-        } else {
-            startForeground(NOTIF_ID, buildNotification("Watching for WaterLevel WiFi…"))
+        foregroundOk = enterForeground()
+        if (!foregroundOk) {
+            // Android refused foreground start (background-start limits). Stop
+            // cleanly instead of crashing; the app restarts us when opened.
+            AuditStore.error(applicationContext, "service", "Phone blocked the background service")
+            stopSelf()
+            return
         }
-        startCycle()
-        scheduleNextAlarm()
+        isRunning = true
+        AuditStore.info(applicationContext, "service", "Background service started")
+    }
+
+    /**
+     * connectedDevice (talking to the WaterLevel SoftAP) has no daily runtime
+     * cap and may start from BOOT_COMPLETED on Android 15. dataSync is only a
+     * fallback: it is capped at 6h/24h there.
+     */
+    private fun enterForeground(): Boolean {
+        val notification = buildNotification("Saving and sending readings")
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return try {
+                startForeground(NOTIF_ID, notification)
+                true
+            } catch (t: Throwable) {
+                Log.e(TAG, "startForeground failed", t)
+                false
+            }
+        }
+        val types = intArrayOf(
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+        for (type in types) {
+            try {
+                startForeground(NOTIF_ID, notification, type)
+                return true
+            } catch (t: Throwable) {
+                Log.w(TAG, "startForeground type=$type refused", t)
+            }
+        }
+        return false
+    }
+
+    /** Android 15+: the dataSync fallback ran out of daily time — stop cleanly. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w(TAG, "foreground time limit reached type=$fgsType — stopping")
+        AuditStore.warn(applicationContext, "service", "Android time limit reached — background service stopped")
+        cancelNextAlarm()
+        stopSelf()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
-                cancelNextAlarm()
-                stopSelf()
-                return START_NOT_STICKY
-            }
-            ACTION_TICK, null -> {
-                startCycle()
-                scheduleNextAlarm()
-            }
-            else -> {
-                startCycle()
-                scheduleNextAlarm()
-            }
+        if (!foregroundOk || intent?.action == ACTION_STOP) {
+            cancelNextAlarm()
+            stopSelf()
+            return START_NOT_STICKY
         }
+        startCycle()
+        scheduleNextAlarm()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        if (isRunning) {
+            AuditStore.info(applicationContext, "service", "Background service stopped")
+        }
+        isRunning = false
+        destroyed = true
         cancelNextAlarm()
         executor.shutdownNow()
         super.onDestroy()
     }
 
     private fun startCycle() {
+        if (destroyed) return
         if (!cycleRunning.compareAndSet(false, true)) {
             Log.i(TAG, "cycle already running — skip")
             return
         }
-        executor.execute {
+        try {
+            executor.execute { runCycleWithLocks() }
+        } catch (t: Throwable) {
+            Log.w(TAG, "cycle rejected", t)
+            cycleRunning.set(false)
+        }
+    }
+
+    private fun runCycleWithLocks() {
+        var wake: PowerManager.WakeLock? = null
+        var wifiLock: WifiManager.WifiLock? = null
+        try {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
-            val wake = pm.newWakeLock(
+            wake = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "WaterLevel:SiteSync",
-            ).apply { setReferenceCounted(false) }
-            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-            @Suppress("DEPRECATION")
-            val wifiLock = wifi.createWifiLock(
-                WifiManager.WIFI_MODE_FULL_HIGH_PERF,
-                "WaterLevel:SiteSyncWifi",
-            ).apply { setReferenceCounted(false) }
-            try {
-                wake.acquire(3 * 60_000L)
-                try {
-                    wifiLock.acquire()
-                } catch (_: Throwable) {
-                    // Some OEMs restrict WifiLock; continue with CPU lock only.
-                }
-                runSyncPhasesBlocking()
-            } catch (t: Throwable) {
-                Log.e(TAG, "cycle failed", t)
-            } finally {
-                try {
-                    if (wifiLock.isHeld) wifiLock.release()
-                } catch (_: Throwable) {
-                }
-                try {
-                    if (wake.isHeld) wake.release()
-                } catch (_: Throwable) {
-                }
-                cycleRunning.set(false)
+            ).apply {
+                setReferenceCounted(false)
+                acquire(4 * 60_000L)
             }
+            try {
+                val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                wifiLock = wifi.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    "WaterLevel:SiteSyncWifi",
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            } catch (_: Throwable) {
+                // Some OEMs restrict WifiLock; continue with CPU lock only.
+            }
+            runSyncPhasesBlocking()
+        } catch (t: Throwable) {
+            Log.e(TAG, "cycle failed", t)
+        } finally {
+            try {
+                wifiLock?.let { if (it.isHeld) it.release() }
+            } catch (_: Throwable) {
+            }
+            try {
+                wake?.let { if (it.isHeld) it.release() }
+            } catch (_: Throwable) {
+            }
+            cycleRunning.set(false)
         }
     }
 
     private fun runSyncPhasesBlocking() {
-        // Best-effort WiFi enable (Android 10+ often ignores this silently).
-        try {
-            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-            @Suppress("DEPRECATION")
-            if (!wifi.isWifiEnabled) {
-                @Suppress("DEPRECATION")
-                wifi.setWifiEnabled(true)
-                sleepQuiet(2_000)
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "could not enable WiFi from service", t)
-        }
+        // Heal phones left with WiFi radio off by older builds.
+        NetworkBinder.ensureWifiRadioOn(applicationContext)
 
-        val onGateway = NetworkBinder.isOnGateway(applicationContext)
-        Log.i(TAG, "cycle start onGateway=$onGateway")
-
-        if (onGateway) {
-            NetworkBinder.bindToGateway(applicationContext)
-            updateNotification("On WaterLevel · pulling sensor data")
-            enqueueFlutterSync("pull")
-            sleepQuiet(18_000)
-        }
-
-        // SoftAP has no internet. Prefer binding to LTE; if that fails while still
-        // on WaterLevel, briefly pause WiFi so mobile data becomes the route.
-        var wifiPaused = false
-        var bound = NetworkBinder.bindToInternet(applicationContext)
-        if ((!bound || NetworkBinder.isOnGateway(applicationContext)) &&
-            !NetworkBinder.hasValidatedInternet(applicationContext)
-        ) {
-            updateNotification("Pausing SoftAP WiFi for cloud upload…")
-            wifiPaused = pauseWifiForUpload()
-            sleepQuiet(4_000)
-            bound = NetworkBinder.bindToInternet(applicationContext)
-        }
-        Log.i(
-            TAG,
-            "upload phase bindInternet=$bound validated=${NetworkBinder.hasValidatedInternet(applicationContext)} wifiPaused=$wifiPaused",
-        )
-        if (!bound && !NetworkBinder.hasValidatedInternet(applicationContext)) {
-            updateNotification(
-                "Waiting for internet — leave WaterLevel WiFi or turn on mobile data",
-            )
-            Log.i(TAG, "cycle done — no internet for upload")
-            if (wifiPaused) resumeWifiAfterUpload()
+        if (!SyncLease.tryAcquire(LEASE_OWNER, LEASE_TTL_MS)) {
+            Log.i(TAG, "sync held by ${SyncLease.holder()} — skip this tick")
             return
         }
-
-        updateNotification("Uploading pending readings over mobile/data…")
-        val native = NativeCloudUploader.uploadPending(applicationContext)
-        Log.i(TAG, "native upload: ${native.message} uploaded=${native.uploaded} left=${native.pendingLeft}")
-        enqueueFlutterSync("upload")
-        sleepQuiet(3_000)
-
-        if (wifiPaused) {
-            updateNotification("Restoring WiFi for next sensor pull…")
-            resumeWifiAfterUpload()
-            sleepQuiet(2_000)
+        try {
+            runLeasedCycle()
+        } finally {
+            try {
+                CloudReporter.report(applicationContext)
+            } catch (t: Throwable) {
+                Log.w(TAG, "report failed", t)
+            }
+            SyncLease.release(LEASE_OWNER)
         }
-
-        updateNotification(
-            when {
-                native.uploaded > 0 && native.pendingLeft == 0 ->
-                    "Cloud up to date · sent ${native.uploaded}"
-                native.uploaded > 0 ->
-                    "Sent ${native.uploaded} · ${native.pendingLeft} still pending"
-                native.pendingLeft == 0 ->
-                    "Cloud up to date"
-                NetworkBinder.isOnGateway(applicationContext) ->
-                    "On WaterLevel · ${native.pendingLeft} waiting — will retry upload"
-                else ->
-                    "Online · ${native.pendingLeft} pending (${native.message})"
-            },
-        )
-        Log.i(TAG, "cycle done")
     }
 
-    /** Best-effort SoftAP release so LTE can carry Firebase traffic. */
-    private fun pauseWifiForUpload(): Boolean {
-        return try {
-            val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-            NetworkBinder.clearBinding(applicationContext)
-            @Suppress("DEPRECATION")
-            if (wifi.isWifiEnabled) {
-                @Suppress("DEPRECATION")
-                wifi.setWifiEnabled(false)
-            } else {
-                true
+    private fun runLeasedCycle() {
+        val onGateway = NetworkBinder.isOnGateway(applicationContext)
+        Log.i(TAG, "cycle start onGateway=$onGateway wifiOn=${NetworkBinder.isWifiRadioOn(applicationContext)}")
+
+        val ctx = applicationContext
+        if (onGateway) {
+            NetworkBinder.bindToGateway(ctx)
+            updateNotification("Getting readings from the sensor…")
+            val requestedAt = SystemClock.elapsedRealtime()
+            enqueueFlutterSync("pull")
+            if (!waitForWorkerPull(requestedAt, 40_000L)) {
+                AuditStore.once(
+                    ctx, "worker_pull_slow", LOG_REPEAT_MS, "warn", "sensor",
+                    "Background sensor read did not finish in time",
+                )
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "could not pause WiFi for upload", t)
-            false
+        }
+
+        val pendingBefore = NativeCloudUploader.pendingCount(ctx)
+        if (pendingBefore == 0) {
+            updateNotification(NOTIF_ALL_SENT)
+            Log.i(TAG, "cycle done — nothing pending")
+            return
+        }
+        if (pendingBefore < 0) {
+            AuditStore.once(
+                ctx, "db_unreadable", LOG_REPEAT_MS, "error", "storage",
+                "Could not read saved readings (phone storage full?)",
+                "free_storage_mb=${DeviceInfo.freeStorageMb(ctx)}",
+            )
+        }
+
+        // SoftAP has no internet. Prefer LTE bind; never power WiFi off.
+        var releasedSoftAp = false
+        try {
+            var bound = NetworkBinder.requestAndBindCellular(ctx, 8_000L)
+            if ((!bound || NetworkBinder.isOnGateway(ctx)) &&
+                !NetworkBinder.hasValidatedInternet(ctx)
+            ) {
+                updateNotification("Sending readings to office…")
+                releasedSoftAp = NetworkBinder.softDisconnectWifi(ctx)
+                sleepQuiet(2_500)
+                bound = NetworkBinder.requestAndBindCellular(ctx, 8_000L)
+            }
+            Log.i(
+                TAG,
+                "upload phase bindInternet=$bound validated=${NetworkBinder.hasValidatedInternet(ctx)} releasedSoftAp=$releasedSoftAp",
+            )
+            if (!bound && !NetworkBinder.hasValidatedInternet(ctx)) {
+                updateNotification("No internet. Readings are saved on this phone.")
+                AuditStore.once(
+                    ctx, "no_internet", LOG_REPEAT_MS, "warn", "cloud",
+                    "No internet — $pendingBefore readings waiting on phone",
+                )
+                rescheduleSoon(noInternetTickMs)
+                return
+            }
+
+            updateNotification("Sending readings to office…")
+            val native = NativeCloudUploader.uploadPending(ctx)
+            Log.i(TAG, "native upload: ${native.message} uploaded=${native.uploaded} left=${native.pendingLeft}")
+            if (native.uploaded > 0) {
+                AuditStore.info(
+                    ctx, "cloud", "Sent ${native.uploaded} readings to cloud (background)",
+                    "left=${native.pendingLeft}",
+                )
+            }
+            if (native.pendingLeft != 0) {
+                AuditStore.once(
+                    ctx, "upload_fail:${native.message}", LOG_REPEAT_MS, "warn", "cloud",
+                    "Background upload incomplete: ${native.message}",
+                    "left=${native.pendingLeft}",
+                )
+            }
+            CloudReporter.report(ctx)
+
+            updateNotification(
+                when {
+                    native.pendingLeft == 0 -> NOTIF_ALL_SENT
+                    native.uploaded > 0 -> "Sending… ${native.pendingLeft} readings left"
+                    else -> "Could not send yet. Will try again. Readings are safe."
+                },
+            )
+            if (native.pendingLeft != 0) {
+                rescheduleSoon(catchUpTickMs)
+            }
+            Log.i(TAG, "cycle done")
+        } finally {
+            NetworkBinder.releaseCellularRequest(applicationContext)
+            if (releasedSoftAp) {
+                // Only nudge WiFi back when we actually dropped SoftAP.
+                resumeWifiAfterUpload()
+                sleepQuiet(1_500)
+            }
+            // Free ESP queue only for readings the office already has.
+            if (NetworkBinder.isOnGateway(applicationContext) || releasedSoftAp) {
+                NetworkBinder.bindToGateway(applicationContext)
+                EspAck.afterCloudUpload(applicationContext)
+            }
+        }
+    }
+
+    /** Wait until the Dart worker reports its SoftAP pull finished (or timeout). */
+    private fun waitForWorkerPull(requestedAt: Long, timeoutMs: Long): Boolean {
+        val deadline = requestedAt + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (SyncLease.lastWorkerPullDoneAt >= requestedAt) return true
+            sleepQuiet(500)
+        }
+        Log.w(TAG, "worker pull did not finish within ${timeoutMs}ms")
+        return false
+    }
+
+    private fun rescheduleSoon(delayMs: Long) {
+        handler.post {
+            cancelNextAlarm()
+            scheduleNextAlarm(delayMs)
         }
     }
 
     private fun resumeWifiAfterUpload() {
         try {
+            NetworkBinder.ensureWifiRadioOn(applicationContext)
             val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
             @Suppress("DEPRECATION")
-            if (!wifi.isWifiEnabled) {
-                @Suppress("DEPRECATION")
-                wifi.setWifiEnabled(true)
+            try {
+                wifi.reconnect()
+            } catch (_: Throwable) {
             }
         } catch (t: Throwable) {
             Log.w(TAG, "could not restore WiFi after upload", t)
         }
     }
 
-    private fun scheduleNextAlarm() {
+    private fun scheduleNextAlarm(delayMs: Long = tickMs) {
         val am = getSystemService(ALARM_SERVICE) as AlarmManager
         val pi = tickPendingIntent()
-        val triggerAt = SystemClock.elapsedRealtime() + tickMs
+        val triggerAt = SystemClock.elapsedRealtime() + delayMs
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                am.canScheduleExactAlarms()
+            if (exactAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                Log.i(TAG, "next tick in ${delayMs}ms (exact alarm)")
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                // Exact alarms revoked: inexact but still fires in Doze.
+                am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                Log.i(TAG, "next tick in ~${delayMs}ms (inexact alarm)")
             } else {
                 @Suppress("DEPRECATION")
                 am.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
             }
-            Log.i(TAG, "next tick in ${tickMs}ms (exact alarm)")
         } catch (t: Throwable) {
-            Log.w(TAG, "exact alarm failed, falling back to handler", t)
+            Log.w(TAG, "alarm failed, falling back to handler", t)
             handler.removeCallbacksAndMessages(null)
             handler.postDelayed({
                 startCycle()
-                scheduleNextAlarm()
-            }, tickMs)
+                scheduleNextAlarm(delayMs)
+            }, delayMs)
         }
     }
 
@@ -307,10 +418,10 @@ class SiteSyncService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "WaterLevel auto sync",
+            "Water level sending",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Pulls dam readings near the station and uploads when online"
+            description = "Shows that readings are being saved and sent to the office"
         }
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(channel)
@@ -324,18 +435,12 @@ class SiteSyncService : Service() {
             launch,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val stop = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, SiteSyncService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        // No "Stop" button: a stray tap would silently halt station uploads.
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("WaterLevel")
+            .setContentTitle("Water Level app is running")
             .setContentText(content)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_water)
             .setContentIntent(pending)
-            .addAction(0, "Stop", stop)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
@@ -351,12 +456,28 @@ class SiteSyncService : Service() {
         const val WORK_TAG = "waterlevel_site_sync"
         const val DART_TASK = "waterlevel_site_sync"
 
-        fun start(context: Context) {
+        private const val LEASE_OWNER = "service"
+        private const val LOG_REPEAT_MS = 30 * 60_000L
+        private const val NOTIF_ALL_SENT = "All readings sent to office"
+
+        @Volatile
+        var isRunning = false
+            private set
+        private const val LEASE_TTL_MS = 4 * 60_000L
+
+        /** Never throws: background-start limits must not crash the caller. */
+        fun start(context: Context): Boolean {
             val intent = Intent(context, SiteSyncService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                true
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not start site sync service", t)
+                false
             }
         }
 

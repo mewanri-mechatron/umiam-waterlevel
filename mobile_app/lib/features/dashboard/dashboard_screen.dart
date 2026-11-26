@@ -44,7 +44,10 @@ class DashboardScreen extends ConsumerWidget {
               if (data.usingMockGateway || (data.latest?.isSimulated ?? false))
                 Container(
                   margin: const EdgeInsets.only(bottom: 14),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
                   decoration: BoxDecoration(
                     color: AppColors.warnBg,
                     borderRadius: BorderRadius.circular(14),
@@ -52,7 +55,11 @@ class DashboardScreen extends ConsumerWidget {
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.science_outlined, color: AppColors.warn, size: 18),
+                      Icon(
+                        Icons.science_outlined,
+                        color: AppColors.warn,
+                        size: 18,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(
@@ -107,7 +114,7 @@ class DashboardScreen extends ConsumerWidget {
                     'Sensor status',
                     data.latest == null
                         ? 'No reading'
-                        : sensorStatusLabel(data.latest!.status)
+                        : sensorStatusLabel(data.latest!.status),
                   ),
                   ('Last measurement', _fmt(data.latest?.measurementTime)),
                   ('Last cloud upload', _fmt(data.syncState.lastUploadTime)),
@@ -115,7 +122,7 @@ class DashboardScreen extends ConsumerWidget {
                     'Calibration',
                     data.station.hasCalibration
                         ? 'Actual ${(data.station.calibActualMm! / 1000).toStringAsFixed(2)} ft'
-                        : 'Not set (use Setup)'
+                        : 'Not set (use Setup)',
                   ),
                 ],
               ),
@@ -147,8 +154,9 @@ class DashboardScreen extends ConsumerWidget {
 
   static String _fmt(int? epoch) {
     if (epoch == null) return '—';
-    return DateFormat('dd MMM, HH:mm:ss')
-        .format(DateTime.fromMillisecondsSinceEpoch(epoch * 1000));
+    return DateFormat(
+      'dd MMM, HH:mm:ss',
+    ).format(DateTime.fromMillisecondsSinceEpoch(epoch * 1000));
   }
 }
 
@@ -284,9 +292,7 @@ class _LevelHero extends StatelessWidget {
             child: Column(
               children: [
                 Text(
-                  feet == null
-                      ? '—'
-                      : '${feet.toStringAsFixed(2)} ft AMSL',
+                  feet == null ? '—' : '${feet.toStringAsFixed(2)} ft AMSL',
                   style: GoogleFonts.manrope(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,

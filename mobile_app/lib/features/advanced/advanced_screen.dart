@@ -45,7 +45,9 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
   }
 
   String _friendlySeconds(int seconds) {
-    if (seconds % 3600 == 0) return '${seconds ~/ 3600} hour${seconds == 3600 ? '' : 's'}';
+    if (seconds % 3600 == 0) {
+      return '${seconds ~/ 3600} hour${seconds == 3600 ? '' : 's'}';
+    }
     if (seconds % 60 == 0) {
       final m = seconds ~/ 60;
       return '$m min';
@@ -95,8 +97,9 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
       if (!mounted) return;
       final latest = status.latest?.sendIntervalSeconds;
       setState(() {
-        _pendingInterval =
-            status.pendingInterval > 0 ? status.pendingInterval : null;
+        _pendingInterval = status.pendingInterval > 0
+            ? status.pendingInterval
+            : null;
         if (latest != null) _appliedInterval = latest;
         final show = _pendingInterval ?? _requestedInterval ?? latest;
         if (overwriteField && show != null) {
@@ -112,8 +115,7 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
               'Requested ${_friendlySeconds(_requestedInterval!)} · '
               'sensor still ${_friendlySeconds(_appliedInterval!)}.';
         } else if (_appliedInterval != null) {
-          _intervalNote =
-              'Current: ${_friendlySeconds(_appliedInterval!)}';
+          _intervalNote = 'Current: ${_friendlySeconds(_appliedInterval!)}';
           _requestedInterval = null;
         } else {
           _intervalNote = null;
@@ -133,6 +135,38 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
 
   Future<void> _applyInterval(int seconds) async {
     final clamped = seconds.clamp(10, 3600);
+    // Short intervals use up the sensor's 65,536 sequence numbers quickly;
+    // after a full cycle old readings get overwritten (see ADMIN_GUIDE.md).
+    if (clamped < 15 * 60) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Short interval'),
+          content: Text(
+            'Every ${_friendlySeconds(clamped)} is for testing only. '
+            'Normal use is 1 hour. Use it only if you were asked to for a test.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Use it'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || !mounted) return;
+    }
+    await ref
+        .read(auditLogServiceProvider)
+        .warn(
+          'Sensor interval changed to ${_friendlySeconds(clamped)}',
+          category: 'sensor',
+        );
+    if (!mounted) return;
     setState(() {
       _savingInterval = true;
       _requestedInterval = clamped;
@@ -152,8 +186,7 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _intervalNote =
-            'Could not set. Join sensor WiFi first.\n$e';
+        _intervalNote = 'Could not set. Join sensor WiFi first.\n$e';
       });
     } finally {
       if (mounted) setState(() => _savingInterval = false);
@@ -229,7 +262,10 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                   const SizedBox(height: 6),
                   Text(
                     'Water level and raw level on Level / History.',
-                    style: const TextStyle(color: AppColors.muted, height: 1.35),
+                    style: const TextStyle(
+                      color: AppColors.muted,
+                      height: 1.35,
+                    ),
                   ),
                   const SizedBox(height: 12),
                   const UnitPicker(),
@@ -266,7 +302,10 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                       if (displayApplied == null && displayPending == null)
                         'Join sensor WiFi, then choose a time (10 sec – 1 hour).',
                     ].join(' · '),
-                    style: const TextStyle(color: AppColors.muted, height: 1.35),
+                    style: const TextStyle(
+                      color: AppColors.muted,
+                      height: 1.35,
+                    ),
                   ),
                   const SizedBox(height: 12),
                   Wrap(
@@ -408,7 +447,10 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                   const SizedBox(height: 6),
                   Text(
                     'WiFi name ${AppConstants.gatewaySsid} · password ${AppConstants.gatewayPassword}',
-                    style: const TextStyle(color: AppColors.muted, height: 1.35),
+                    style: const TextStyle(
+                      color: AppColors.muted,
+                      height: 1.35,
+                    ),
                   ),
                   const SizedBox(height: 14),
                   FilledButton(
@@ -435,8 +477,8 @@ class _AdvancedScreenState extends ConsumerState<AdvancedScreen> {
                                 const Duration(seconds: 2),
                               );
                             }
-                            final msg =
-                                await net.requestGatewayWifiConnection();
+                            final msg = await net
+                                .requestGatewayWifiConnection();
                             await ref
                                 .read(autoSyncControllerProvider)
                                 .runCycle(force: true);

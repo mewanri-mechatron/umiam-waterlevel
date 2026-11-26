@@ -3,6 +3,7 @@ package com.waterlevel.app
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Bundle
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -13,6 +14,13 @@ import io.flutter.embedding.engine.FlutterEngine
  * APIs work in the WorkManager background FlutterEngine.
  */
 class MainActivity : FlutterActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        CrashWatch.install(this)
+        super.onCreate(savedInstanceState)
+        val app = applicationContext
+        Thread { CrashWatch.reportPastExits(app) }.start()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.plugins.add(WifiPlugin())

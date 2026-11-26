@@ -1,10 +1,10 @@
+import 'dart:async';
 import 'dart:math';
 
 import '../core/constants/app_constants.dart';
 import '../core/errors/app_exception.dart';
 import '../core/utils/water_level_math.dart';
 import '../database/app_database.dart';
-import '../models/gateway_models.dart';
 import '../models/reading.dart';
 import '../models/station.dart';
 import 'firebase_service.dart';
@@ -80,19 +80,19 @@ class SyncService {
 
   Future<int> countLocalReadings({
     String stationId = AppConstants.defaultStationId,
-  }) =>
-      _db.countReadings(stationId);
+  }) => _db.countReadings(stationId);
 
-  /// Drop phone readings before local midnight today.
-  Future<int> purgeLocalReadingsBeforeToday({
+  static const localRetention = Duration(days: 30);
+
+  /// Keeps the phone database small. Only rows already in the cloud and older
+  /// than [localRetention] are removed — unsent readings are never touched.
+  Future<int> applyLocalRetention({
     String stationId = AppConstants.defaultStationId,
-  }) async {
-    final now = DateTime.now();
-    final start = DateTime(now.year, now.month, now.day);
-    final beforeEpoch = start.millisecondsSinceEpoch ~/ 1000;
-    return _db.deleteReadingsBefore(
+  }) {
+    final cutoff = DateTime.now().subtract(localRetention);
+    return _db.deleteUploadedReadingsBefore(
       stationId: stationId,
-      beforeEpoch: beforeEpoch,
+      beforeEpoch: cutoff.millisecondsSinceEpoch ~/ 1000,
     );
   }
 
@@ -107,8 +107,8 @@ class SyncService {
 
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
-    // Sensor team flow: /time → /data loop → save → /ack?upto=
-    String? statusNote;
+    // Sensor team flow: /time → /data loop → save. ACK only after cloud.
+    var statusNote = '';
     try {
       await _gateway.syncTime(now);
     } catch (_) {
@@ -122,7 +122,7 @@ class SyncService {
       statusNote =
           'queue=${status.queueCount} packets=${status.packets}$pendingCfg';
     } catch (_) {
-      statusNote = '${statusNote ?? ''} · /status skipped'.trim();
+      statusNote = '$statusNote · /status skipped'.trim();
     }
 
     final dtos = await _gateway.getData(sinceId: 0);
@@ -175,34 +175,20 @@ class SyncService {
           firebaseUploaded: false,
           createdAt: now,
           isSimulated: _gateway.isMock,
+          gatewayRecordId: id > 0 ? id : null,
         ),
       );
     }
 
     final result = await _db.insertReadings(readings);
-    final toAck = [...result.inserted, ...result.duplicates];
 
-    var acked = 0;
-    if (toAck.isNotEmpty || maxRecordId > 0) {
-      try {
-        if (maxRecordId > 0) {
-          final ack = await _gateway.ackUpTo(maxRecordId);
-          acked = ack.acked;
-        } else {
-          final ack = await _gateway.ack(
-            AckRequest(
-              stationId: stationId,
-              records: toAck
-                  .map((r) => (bootId: r.bootId, seq: r.seq))
-                  .toList(),
-            ),
-          );
-          acked = ack.acked;
-        }
-      } catch (_) {
-        // Data is already safe in SQLite — ACK failure must not discard the pull.
-        statusNote = '$statusNote · ACK failed (data kept on phone)';
-      }
+    // Never ACK here. The ESP keeps every reading until it is confirmed in
+    // the cloud (see [ackEspAfterCloud]). Uninstalling the phone then cannot
+    // wipe readings the cloud never received.
+    if (maxRecordId > 0) {
+      statusNote = statusNote.isEmpty
+          ? 'sensor keeps queue until they are in the cloud'
+          : '$statusNote · sensor keeps queue until they are in the cloud';
     }
 
     final pending = await _db.countPending(stationId);
@@ -215,6 +201,9 @@ class SyncService {
       ),
     );
 
+    // Duplicates may already be in the cloud from an earlier cycle.
+    final acked = await ackEspAfterCloud(stationId: stationId);
+
     return DownloadResult(
       downloaded: dtos.length,
       inserted: result.inserted.length,
@@ -222,6 +211,28 @@ class SyncService {
       acked: acked,
       message: statusNote,
     );
+  }
+
+  /// Tells Node B it may delete readings the cloud already has.
+  /// Safe rule: ACK up to one below the oldest unsent gateway id (or the
+  /// newest uploaded id when nothing is pending). Never past an unsent row.
+  Future<int> ackEspAfterCloud({
+    String stationId = AppConstants.defaultStationId,
+  }) async {
+    final upTo = await _db.safeEspAckUpTo(stationId);
+    if (upTo == null || upTo <= 0) return 0;
+    final last = await _db.lastEspAckId(stationId);
+    // Skip only exact duplicates. Allow upTo < last after a gateway id reset.
+    if (upTo == last) return 0;
+    if (!await _network.isOnGatewayFast(allowHttpProbe: false)) return 0;
+    try {
+      await _network.bindToGatewayNetwork();
+      await _gateway.ackUpTo(upTo);
+      await _db.setLastEspAckId(stationId, upTo);
+      return upTo;
+    } catch (_) {
+      return 0;
+    }
   }
 
   /// Restore history from Firebase into local SQLite (e.g. after reinstall).
@@ -279,16 +290,17 @@ class SyncService {
       // Calibration restore is best-effort; readings still matter.
     }
 
-    final remote = await _firebase.fetchReadings(stationId: stationId);
+    final since = DateTime.now().subtract(localRetention);
+    final remote = await _firebase.fetchReadings(
+      stationId: stationId,
+      sinceEpoch: since.millisecondsSinceEpoch ~/ 1000,
+    );
     final result = await _db.insertReadings(remote);
     final pending = await _db.countPending(stationId);
     final sync = await _db.getSyncState(stationId);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     await _db.updateSyncState(
-      sync.copyWith(
-        lastDownloadTime: now,
-        pendingUploadCount: pending,
-      ),
+      sync.copyWith(lastDownloadTime: now, pendingUploadCount: pending),
     );
 
     return CloudPullResult(
@@ -378,8 +390,10 @@ class SyncService {
       // Drain all pending. Firebase multi-path updates stay reliable in
       // ~100-row chunks (payload size / timeout); keep looping until empty.
       for (var round = 0; round < 200; round++) {
-        final batch =
-            await _db.getPendingUploads(stationId: stationId, limit: 100);
+        final batch = await _db.getPendingUploads(
+          stationId: stationId,
+          limit: 100,
+        );
         if (batch.isEmpty) break;
 
         var roundOk = false;
@@ -391,6 +405,11 @@ class SyncService {
             lastError = null;
             failed = 0;
             roundOk = true;
+            break;
+          } on TimeoutException catch (e) {
+            // No route to Firebase right now; retrying only burns the cycle.
+            lastError = e;
+            failed = batch.length;
             break;
           } catch (e) {
             lastError = e;
@@ -415,6 +434,14 @@ class SyncService {
               : sync.failedUploadCount + failed,
         ),
       );
+
+      if (uploaded > 0 || pending == 0) {
+        // Best-effort: free ESP queue space once the cloud has the rows.
+        // Requires sensor WiFi; otherwise the next sensor cycle will ACK.
+        try {
+          await ackEspAfterCloud(stationId: stationId);
+        } catch (_) {}
+      }
 
       if (uploaded == 0 && pending == 0) {
         return UploadResult(

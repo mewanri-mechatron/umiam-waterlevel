@@ -21,11 +21,7 @@ class _ShellScreenState extends State<ShellScreen> {
     return Scaffold(
       body: IndexedStack(
         index: _index,
-        children: const [
-          HomeScreen(),
-          HistoryScreen(),
-          SetupScreen(),
-        ],
+        children: const [HomeScreen(), HistoryScreen(), SetupScreen()],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,

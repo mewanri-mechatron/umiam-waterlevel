@@ -1,0 +1,259 @@
+/* Field phones / logs — follows index.html dashboard tokens & spacing. */
+
+.phones-tabs {
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 4px;
+}
+
+.phones-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ph-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.ph-card {
+  background: var(--panel-soft);
+  border: 1px solid var(--outline);
+  border-radius: var(--radius);
+  padding: 16px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease;
+}
+
+.ph-card:hover,
+.ph-card.selected {
+  border-color: var(--teal-mid);
+}
+
+.ph-card.selected {
+  box-shadow: inset 0 0 0 1px var(--teal-mid);
+  background: var(--panel);
+}
+
+.ph-card h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.ph-sub {
+  margin: 4px 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.ph-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 999px;
+  margin: 0 6px 6px 0;
+  white-space: nowrap;
+}
+
+.ph-badge.ok { background: var(--success-bg); color: var(--success-ink); }
+.ph-badge.warn { background: var(--warn-bg); color: var(--warn); }
+.ph-badge.bad { background: var(--danger-bg); color: var(--danger-ink); }
+.ph-badge.info { background: var(--panel-mid); color: var(--muted); }
+
+.ph-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+.ph-stats span {
+  display: block;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ph-stats strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ph-toolbar,
+.ph-toolbar-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+
+.ph-toolbar {
+  padding: 14px;
+  background: var(--panel-soft);
+  border-radius: 12px;
+}
+
+.ph-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  min-width: 140px;
+}
+
+.ph-field-grow { flex: 1 1 220px; min-width: 180px; }
+
+.ph-field select,
+.ph-field input {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink);
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--outline);
+  background: var(--panel);
+  min-height: 40px;
+}
+
+.ph-csv { align-self: end; min-height: 40px; }
+
+.ph-counts {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.ph-counts b { color: var(--ink); font-weight: 600; }
+
+.ph-logs-host { min-height: 240px; }
+
+.ph-table-wrap {
+  max-height: min(70vh, 720px);
+  overflow: auto;
+  border: 1px solid var(--outline);
+  border-radius: var(--radius);
+}
+
+.ph-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.ph-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-soft);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ph-table th,
+.ph-table td {
+  text-align: left;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.ph-table tbody tr:hover td { background: var(--panel-soft); }
+
+.ph-table td.detail {
+  color: var(--muted);
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-width: 420px;
+  font-size: 12px;
+}
+
+.ph-table td.nowrap { white-space: nowrap; }
+
+.ph-empty {
+  margin: 0;
+  padding: 20px 4px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.ph-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.ph-summary > div {
+  background: var(--panel-soft);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.ph-summary span {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.ph-summary strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ph-summary .ok strong { color: var(--success-ink); }
+.ph-summary .bad strong { color: var(--danger); }
+
+.ph-note {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ph-note.bad {
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+}
+
+.ph-subhead {
+  margin: 8px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .ph-field { min-width: calc(50% - 8px); }
+  .ph-field-grow { min-width: 100%; }
+}

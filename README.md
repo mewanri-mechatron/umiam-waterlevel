@@ -6,6 +6,10 @@ Offline-first water-level monitoring (no internet at the sensor).
 Node A (STM + LoRa) → Node B (ESP SoftAP) → Phone app → Firebase → Web dashboard
 ```
 
+**Guides:** [Station guards](docs/GUARD_GUIDE.md) · [Office / system managers](docs/ADMIN_GUIDE.md)  
+**APK to install:** `share/Umiam-WaterLevel.apk` (release-signed; see the admin guide before updating phones)  
+**Office page:** `/phones.html` on the hosted dashboard (phones, logs, data check)
+
 **Firebase project:** `umiam-waterlevel`  
 **ESP WiFi:** SSID `WaterLevel` · password `12345678` · IP `192.168.4.1`
 
@@ -151,12 +155,12 @@ Rules file used: `firebase/database.rules.json`
 ```bash
 cd d:\Projects\UmiamProject\mobile_app
 flutter pub get
-flutter build apk --debug
+flutter build apk --release
 ```
 
 3. APK path:
 
-   `mobile_app\build\app\outputs\flutter-apk\app-debug.apk`
+   `mobile_app\build\app\outputs\flutter-apk\app-release.apk` (copy it to `share\Umiam-WaterLevel.apk`)
 
 4. Install it on the phone, open the app **once**, and allow:
    - Notifications

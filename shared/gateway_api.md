@@ -88,9 +88,10 @@ Sets Node A send interval; applied after Node A’s next send. While waiting, `/
 1. Join `WaterLevel` WiFi  
 2. `GET /time?epoch=…`  
 3. `GET /data` loop (`since` / `last_id` / `more`)  
-4. Save locally (dedupe `boot`+`seq`)  
-5. `GET /ack?upto=last_id`  
-6. When internet is available, upload to Firebase and mark uploaded
+4. Save locally (dedupe `boot`+`seq`), keep Node B `id` as `gateway_record_id`  
+5. **Do not ACK yet** — Node B must keep the queue until Firebase has the rows  
+6. When internet is available, upload to Firebase and mark uploaded  
+7. Only then `GET /ack?upto=N`, where `N` is the highest Node B id such that every local reading with `gateway_record_id ≤ N` is already uploaded. Never ACK past an unsent reading (uninstalling the phone then cannot wipe data the office never got).
 
 ## Firebase
 
